@@ -76,6 +76,7 @@ jobs:
           node-version-file: package.json
           cache: true
           run-install: true
+      - run: sudo apt-get update && sudo apt-get install -y libsecret-1-dev pkg-config
       - uses: dtolnay/rust-toolchain@stable
       - run: node scripts/update-release-package-versions.ts "${{ needs.preflight.outputs.version }}"
       - run: vp run build:desktop

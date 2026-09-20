@@ -7755,7 +7755,7 @@ export default function ChatView(props: ChatViewProps) {
             stackedThreadToast({
               type: "info",
               title: `Jev selected ${routedSelection.model}`,
-              description: "This choice applies to this submission only.",
+              description: "You can change the model at any time.",
             }),
           );
         }

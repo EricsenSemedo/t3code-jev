@@ -20,6 +20,7 @@ jobs:
           node-version-file: package.json
           cache: true
           run-install: true
+      - run: sudo apt-get update && sudo apt-get install -y libsecret-1-dev pkg-config
       - run: vp run --filter @t3tools/desktop ensure:electron
       - run: vp check
       - run: vp run typecheck
@@ -35,6 +36,7 @@ jobs:
           node-version-file: package.json
           cache: true
           run-install: true
+      - run: sudo apt-get update && sudo apt-get install -y libsecret-1-dev pkg-config
       - run: vp run --filter @t3tools/desktop ensure:electron
       - run: vp run test
 
@@ -147,6 +149,7 @@ jobs:
           node-version-file: package.json
           cache: true
           run-install: true
+      - run: sudo apt-get update && sudo apt-get install -y libsecret-1-dev pkg-config
       - uses: dtolnay/rust-toolchain@stable
       - run: node scripts/update-release-package-versions.ts "${{ needs.preview_metadata.outputs.version }}"
       - run: vp run build:desktop

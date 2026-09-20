@@ -30,7 +30,7 @@ export function availableJevModelLanes(
   );
 }
 
-/** Returns a submission-only selection; it never changes the picker or global preference. */
+/** Returns the model selection for the pending submission. */
 export function resolveJevModelSelection({
   suggestion,
   models,
