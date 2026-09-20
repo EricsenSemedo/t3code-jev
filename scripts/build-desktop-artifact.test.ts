@@ -434,6 +434,26 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
   );
 
+  it.effect("uses the Personal desktop entry class for Linux builds", () =>
+    Effect.gen(function* () {
+      const config = yield* createBuildConfig(
+        "linux",
+        "AppImage",
+        "1.2.3-nightly.20260413.42",
+        false,
+        false,
+        undefined,
+        undefined,
+      );
+
+      const linux = config.linux as Record<string, unknown>;
+      const desktop = linux.desktop as { readonly entry: Record<string, unknown> };
+      assert.equal(config.productName, "T3 Code Personal (Nightly)");
+      assert.equal(config.artifactName, "T3-Code-Personal-${version}-${arch}.${ext}");
+      assert.equal(desktop.entry.StartupWMClass, "t3-code-personal");
+    }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
+  );
+
   it("promotes target fff binaries to direct staged dependencies", () => {
     assert.deepStrictEqual(resolveFffNativeDependencies("mac", "arm64", "0.9.4"), {
       "@ff-labs/fff-bin-darwin-arm64": "0.9.4",

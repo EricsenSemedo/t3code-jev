@@ -1413,7 +1413,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       category: "Development",
       desktop: {
         entry: {
-          StartupWMClass: "t3code",
+          StartupWMClass: "t3-code-personal",
         },
       },
     };
