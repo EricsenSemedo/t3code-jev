@@ -118,7 +118,7 @@ export interface BarrelFile {
 /**
  * Service interface for discovering annotated barrel files and regenerating their export contents.
  *
- * @category models
+ * @category services
  * @since 4.0.0
  */
 export interface BarrelGenerator {
@@ -132,7 +132,7 @@ export interface BarrelGenerator {
 /**
  * Service tag for barrel file generation.
  *
- * @category tags
+ * @category services
  * @since 4.0.0
  */
 export const BarrelGenerator: Context.Service<BarrelGenerator, BarrelGenerator> = Context.Service(
@@ -182,7 +182,10 @@ export const layer: Layer.Layer<BarrelGenerator, never, FileSystem.FileSystem | 
         nodir: true
       })
 
-      const results = yield* Effect.forEach(indexFiles, (file) => discoverFile(path.join(cwd, file)))
+      const results = yield* Effect.forEach(
+        indexFiles,
+        (file) => discoverFile(path.isAbsolute(file) ? file : path.join(cwd, file))
+      )
       return results.filter((file) => file !== undefined)
     })
 

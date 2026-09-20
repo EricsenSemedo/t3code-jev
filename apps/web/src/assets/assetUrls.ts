@@ -1,76 +1,53 @@
 import { useAtomValue } from "@effect/atom-react";
-import { resolveAssetUrl } from "@t3tools/client-runtime/state/assets";
+import {
+  type AssetUrlState,
+  assetUrlStateFromResult,
+  EMPTY_ASSET_URL_ATOM,
+  resolveAssetUrl,
+} from "@t3tools/client-runtime/state/assets";
+import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import type { AssetResource, EnvironmentId } from "@t3tools/contracts";
 import { AsyncResult } from "effect/unstable/reactivity";
-import { useMemo } from "react";
+import { useCallback, useMemo } from "react";
 
 import { assetEnvironment } from "~/state/assets";
 import { usePreparedConnection } from "~/state/session";
+import { useAtomQueryRunner } from "~/state/use-atom-query-runner";
 
-export { resolveAssetUrl } from "@t3tools/client-runtime/state/assets";
-
-export interface AssetUrlState {
-  readonly url: string | null;
-  readonly error: string | null;
-  readonly loading: boolean;
-}
-
-function assetUrlErrorMessage(result: unknown): string {
-  if (
-    result !== null &&
-    typeof result === "object" &&
-    "error" in result &&
-    result.error instanceof Error &&
-    result.error.message.trim().length > 0
-  ) {
-    return result.error.message;
-  }
-  if (result instanceof Error && result.message.trim().length > 0) {
-    return result.message;
-  }
-  return "Media could not be loaded.";
-}
-
-export function useAssetUrl(environmentId: EnvironmentId, resource: AssetResource): string | null {
-  const preparedConnection = usePreparedConnection(environmentId);
-  const result = useAtomValue(
-    assetEnvironment.createUrl({
-      environmentId,
-      input: { resource },
-    }),
-  );
-  if (preparedConnection._tag === "None" || result._tag !== "Success") {
-    return null;
-  }
-  return resolveAssetUrl(preparedConnection.value.httpBaseUrl, result.value.relativeUrl);
-}
+export { resolveAssetUrl, type AssetUrlState } from "@t3tools/client-runtime/state/assets";
 
 export function useAssetUrlState(
-  environmentId: EnvironmentId,
-  resource: AssetResource,
+  environmentId: EnvironmentId | null,
+  resource: AssetResource | null,
 ): AssetUrlState {
   const preparedConnection = usePreparedConnection(environmentId);
   const result = useAtomValue(
-    assetEnvironment.createUrl({
-      environmentId,
-      input: { resource },
-    }),
+    environmentId === null || resource === null
+      ? EMPTY_ASSET_URL_ATOM
+      : assetEnvironment.createUrl({ environmentId, input: { resource } }),
   );
+  return assetUrlStateFromResult(
+    result,
+    preparedConnection._tag === "Some" ? preparedConnection.value.httpBaseUrl : null,
+  );
+}
 
-  if (preparedConnection._tag === "None") {
-    return { url: null, error: null, loading: true };
-  }
-  if (result._tag === "Success") {
-    return {
-      url: resolveAssetUrl(preparedConnection.value.httpBaseUrl, result.value.relativeUrl),
-      error: null,
-      loading: false,
-    };
-  }
-  if (result._tag === "Failure") {
-    return { url: null, error: assetUrlErrorMessage(result), loading: false };
-  }
-  return { url: null, error: null, loading: true };
+export function useAssetUrlRefresh(
+  environmentId: EnvironmentId | null,
+  resource: AssetResource | null,
+): () => Promise<string | null> {
+  const connection = usePreparedConnection(environmentId);
+  const httpBaseUrl = connection._tag === "Some" ? connection.value.httpBaseUrl : null;
+  const refresh = useAtomQueryRunner(assetEnvironment.createUrl, {
+    reportFailure: false,
+    refresh: true,
+  });
+  return useCallback(async () => {
+    if (environmentId === null || resource === null || httpBaseUrl === null) return null;
+    const result = await refresh({ environmentId, input: { resource } });
+    if (result._tag === "Failure") throw squashAtomCommandFailure(result);
+    return resolveAssetUrl(httpBaseUrl, result.value.relativeUrl);
+  }, [environmentId, resource, refresh, httpBaseUrl]);
 }
 
 export function useAssetUrls(

@@ -11,14 +11,13 @@ platform builds succeed and contains the AppImage with `nightly-linux.yml`, plus
 `.exe`, its `.exe.blockmap`, and `nightly.yml`.
 
 Each packaging job sets `T3CODE_DESKTOP_UPDATE_REPOSITORY` from `github.repository`, so Electron
-checks this fork's releases. Windows also receives the Linux `node-pty` prebuild needed by its
-bundled WSL backend. Builds are unsigned unless a future, separate signing decision adds signing
+checks this fork's releases. Windows also receives the matching Linux CLI archive for its bundled WSL backend.
+That archive is built and smoke-tested from the same commit and version. Builds are unsigned unless a future, separate signing decision adds signing
 configuration.
 
-The Windows NSIS installer remains per-user and does not require elevation. It carries a small
-`app-builder-lib@26.8.1` patch that backports the upstream Windows 8+ guard for the legacy
-`System.dll` Win7 compatibility call. This avoids a known installer crash on current Windows while
-retaining the compatibility path for Windows 7.
+The Windows NSIS installer remains per-user and does not require elevation. The current
+upstream Electron Builder includes its own corrected installer memory handling; no older
+installer backport is retained.
 
 Enable Actions and grant the workflow `contents: write` only when ready to publish. Do not run a
 manual dispatch or create a release until that review is complete. The workflow intentionally
@@ -35,12 +34,6 @@ that review branch. A merge conflict aborts the run without creating a branch or
 The workflow never resets `main` and never auto-merges: the dispatched CI and a review must pass
 before merging the sync PR.
 
-## Alchemy reference snapshot
-
-The relay uses published `alchemy@2.0.0-beta.52`. Its read-only reference snapshot under
-`.repos/alchemy-effect` was refreshed from tag `v2.0.0-beta.52`, resolved to commit
-`62389cc7d4cd5710fd876061e51b3fb64fad077d`. The legacy reference import has no Git subtree
-metadata, so `vp run sync:repos --repo alchemy-effect` cannot pull it. Until that history is
-migrated separately, refresh this reference by cloning the exact configured tag, verifying the
-resolved commit, and replacing only the reference directory with that source snapshot. Do not
-copy its `.git` directory or import it into application code.
+Keep current upstream dependencies, native helpers, and vendored reference snapshots together
+when syncing. Reapply only the fork-specific UI, routing, speech, identity, and update changes;
+never restore older whole files to resolve conflicts.

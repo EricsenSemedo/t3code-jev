@@ -62,10 +62,11 @@ jobs:
       - run: vp run typecheck
       - run: vp run test
 
-  wsl_prebuild:
+  wsl_runtime:
     needs: preflight
     if: needs.preflight.outputs.has_changes == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
         with:
@@ -75,22 +76,31 @@ jobs:
           node-version-file: package.json
           cache: true
           run-install: true
-      - shell: bash
+      - uses: dtolnay/rust-toolchain@stable
+      - run: node scripts/update-release-package-versions.ts "${{ needs.preflight.outputs.version }}"
+      - run: vp run build:desktop
+      - name: Build Linux CLI for the Windows WSL backend
+        env:
+          VP_NODE_VERSION: "26.8.2"
+        run: node apps/server/scripts/cli.ts build-exe --verbose
+      - name: Package WSL runtime
+        shell: bash
         run: |
           set -euo pipefail
-          pty_package="$(node -e "console.log(require.resolve('node-pty/package.json', { paths: ['apps/server'] }))")"
-          pty_dir="$(dirname "$pty_package")"
-          (cd "$pty_dir" && npx --yes node-gyp rebuild)
-          mkdir -p wsl-prebuild && cp "$pty_dir/build/Release/pty.node" wsl-prebuild/pty.node
+          cargo build --locked --release --manifest-path native/resource-monitor/Cargo.toml --target x86_64-unknown-linux-gnu
+          mkdir -p "$RUNNER_TEMP/cli-resource-monitor/linux-x64"
+          cp native/resource-monitor/target/x86_64-unknown-linux-gnu/release/t3-resource-monitor "$RUNNER_TEMP/cli-resource-monitor/linux-x64/"
+          node scripts/build-cli-archive.ts --platform linux --arch x64 --version "${{ needs.preflight.outputs.version }}" --resource-monitor-dir "$RUNNER_TEMP/cli-resource-monitor" --output-dir wsl-runtime
+          node scripts/smoke-cli-archive.ts --archive wsl-runtime/*.tar.gz --expect-version "${{ needs.preflight.outputs.version }}"
       - uses: actions/upload-artifact@v7
         with:
-          name: wsl-node-pty-x64
-          path: wsl-prebuild/pty.node
+          name: wsl-runtime-linux-x64
+          path: wsl-runtime/*
           if-no-files-found: error
 
   build:
-    needs: [preflight, verify, wsl_prebuild]
-    if: needs.preflight.outputs.has_changes == 'true' && needs.verify.result == 'success' && needs.wsl_prebuild.result == 'success'
+    needs: [preflight, verify, wsl_runtime]
+    if: needs.preflight.outputs.has_changes == 'true' && needs.verify.result == 'success' && needs.wsl_runtime.result == 'success'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     strategy:
@@ -113,20 +123,38 @@ jobs:
           cache: true
           run-install: true
       - run: vp run --filter @t3tools/desktop ensure:electron
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Spectre-mitigated MSVC libs
+        if: matrix.platform == 'win'
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $installPath = & $vswhere -products * -latest -property installationPath
+          $setupExe = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\setup.exe"
+          $proc = Start-Process -FilePath $setupExe `
+            -ArgumentList "modify", "--installPath", "`"$installPath`"", "--add", `
+            "Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre", "--quiet", "--norestart" `
+            -Wait -PassThru -NoNewWindow
+          if ($null -eq $proc -or $proc.ExitCode -ne 0) {
+            $code = if ($null -ne $proc) { $proc.ExitCode } else { 1 }
+            Write-Error "Visual Studio Installer failed with exit code $code"
+            exit $code
+          }
+
       - if: matrix.platform == 'linux'
-        run: sudo apt-get update && sudo apt-get install -y imagemagick
+        run: sudo apt-get update && sudo apt-get install -y imagemagick libsecret-1-dev pkg-config
       - if: matrix.platform == 'win'
         uses: actions/download-artifact@v8
         with:
-          name: wsl-node-pty-x64
-          path: wsl-prebuild
+          name: wsl-runtime-linux-x64
+          path: wsl-runtime
       - name: Build updater-enabled artifact
         shell: bash
         env:
           T3CODE_DESKTOP_UPDATE_REPOSITORY: ${{ github.repository }}
         run: |
           args=(--platform "${{ matrix.platform }}" --target "${{ matrix.target }}" --arch x64 --build-version "${{ needs.preflight.outputs.version }}")
-          if [[ "${{ matrix.platform }}" == win ]]; then args+=(--wsl-prebuild "$GITHUB_WORKSPACE/wsl-prebuild/pty.node"); fi
+          if [[ "${{ matrix.platform }}" == win ]]; then args+=(--wsl-runtime "$GITHUB_WORKSPACE"/wsl-runtime/t3-*-linux-x64.tar.gz); fi
           vp run dist:desktop:artifact "${args[@]}"
       - name: Collect and verify assets
         shell: bash

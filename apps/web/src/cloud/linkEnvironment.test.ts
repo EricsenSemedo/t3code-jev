@@ -26,10 +26,7 @@ import { remoteHttpClientLayer } from "@t3tools/client-runtime/rpc";
 import { __resetDesktopPrimaryAuthForTests } from "../environments/primary/desktopAuth";
 
 import {
-  collectCloudLinkTargets,
   linkPrimaryEnvironmentToCloud,
-  listManagedCloudEnvironments,
-  normalizeRelayBaseUrl,
   readPrimaryCloudLinkState,
   type CloudLinkTarget,
   unlinkPrimaryEnvironmentFromCloud,
@@ -91,6 +88,7 @@ function registryLayer(options?: {
       const session: RpcSession = {
         client,
         initialConfig: Effect.never,
+        subscribeServerConfig: (input) => client.subscribeServerConfig(input),
         ready: Effect.void,
         probe: Effect.void,
         closed: Effect.never,
@@ -154,48 +152,6 @@ afterEach(() => {
 });
 
 describe("web cloud link environment client", () => {
-  it("normalizes relay URLs and de-duplicates cloud link targets", () => {
-    expect(normalizeRelayBaseUrl(" https://relay.example.test/// ")).toBe(
-      "https://relay.example.test",
-    );
-    expect(normalizeRelayBaseUrl(" ")).toBeNull();
-    expect(
-      collectCloudLinkTargets({
-        primary: TARGET,
-        saved: [TARGET, { ...TARGET, environmentId: "environment-2" }],
-      }).map((target) => target.environmentId),
-    ).toEqual(["environment-1", "environment-2"]);
-  });
-
-  it.effect("lists relay-managed environments through the typed relay client", () =>
-    Effect.gen(function* () {
-      const fetchMock = vi.fn().mockResolvedValue(
-        Response.json({
-          environments: [
-            {
-              environmentId: "environment-1",
-              label: "Desktop",
-              endpoint: {
-                httpBaseUrl: "https://desktop.example.test",
-                wsBaseUrl: "wss://desktop.example.test",
-                providerKind: "cloudflare_tunnel",
-              },
-              linkedAt: "2026-06-06T00:00:00.000Z",
-            },
-          ],
-        }),
-      );
-      vi.stubGlobal("fetch", fetchMock);
-
-      const environments = yield* withServices(
-        listManagedCloudEnvironments({ clerkToken: "clerk-token" }),
-      );
-
-      expect(environments).toHaveLength(1);
-      expect(fetchMock.mock.calls[0]?.[1]?.headers.authorization).toBe("Bearer clerk-token");
-    }),
-  );
-
   it.effect("reads primary cloud link state from the explicit target", () =>
     Effect.gen(function* () {
       const fetchMock = vi.fn().mockResolvedValue(
@@ -204,6 +160,7 @@ describe("web cloud link environment client", () => {
           cloudUserId: "user-1",
           relayUrl: "https://relay.example.test",
           relayIssuer: "https://relay.example.test",
+          managedTunnelActive: true,
           publishAgentActivity: false,
         }),
       );
@@ -217,6 +174,7 @@ describe("web cloud link environment client", () => {
           cloudUserId: "user-1",
           relayUrl: "https://relay.example.test",
           relayIssuer: "https://relay.example.test",
+          managedTunnelActive: true,
           publishAgentActivity: false,
         }),
       );
@@ -234,6 +192,7 @@ describe("web cloud link environment client", () => {
           cloudUserId: "user-1",
           relayUrl: "https://relay.example.test",
           relayIssuer: "https://relay.example.test",
+          managedTunnelActive: true,
           publishAgentActivity: false,
         }),
       );
@@ -261,6 +220,7 @@ describe("web cloud link environment client", () => {
           cloudUserId: "user-1",
           relayUrl: "https://relay.example.test",
           relayIssuer: "https://relay.example.test",
+          managedTunnelActive: true,
           publishAgentActivity: true,
         }),
       );
@@ -335,6 +295,57 @@ describe("web cloud link environment client", () => {
           httpBaseUrl: TARGET.httpBaseUrl,
           wsBaseUrl: TARGET.wsBaseUrl,
         },
+      });
+    }),
+  );
+
+  it.effect("links publish-only without a managed tunnel", () =>
+    Effect.gen(function* () {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(
+          Response.json({
+            challenge: "challenge",
+            expiresAt: "2026-06-06T00:05:00.000Z",
+          }),
+        )
+        .mockResolvedValueOnce(Response.json("signed-proof"))
+        .mockResolvedValueOnce(
+          Response.json({
+            ok: true,
+            environmentId: TARGET.environmentId,
+            endpoint: {
+              httpBaseUrl: TARGET.httpBaseUrl,
+              wsBaseUrl: TARGET.wsBaseUrl,
+              providerKind: "manual",
+            },
+            endpointRuntime: null,
+            relayIssuer: "https://relay.example.test",
+            cloudUserId: "user-1",
+            environmentCredential: "environment-credential",
+            cloudMintPublicKey: "public-key",
+          }),
+        )
+        .mockResolvedValueOnce(
+          Response.json({ ok: true, endpointRuntimeStatus: { status: "disabled" } }),
+        );
+      vi.stubGlobal("fetch", fetchMock);
+
+      yield* withServices(
+        linkPrimaryEnvironmentToCloud({
+          target: TARGET,
+          clerkToken: "clerk-token",
+          mode: "publish_only",
+        }),
+      );
+
+      // @effect-diagnostics-next-line preferSchemaOverJson:off
+      expect(JSON.parse(bodyText(fetchMock.mock.calls[0]?.[1]?.body))).toMatchObject({
+        managedTunnelsEnabled: false,
+      });
+      // @effect-diagnostics-next-line preferSchemaOverJson:off
+      expect(JSON.parse(bodyText(fetchMock.mock.calls[1]?.[1]?.body))).toMatchObject({
+        endpoint: { providerKind: "manual" },
       });
     }),
   );

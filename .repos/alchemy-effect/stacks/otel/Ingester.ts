@@ -29,16 +29,12 @@ import { IngestToken } from "./IngestToken.ts";
 export default class Ingester extends Cloudflare.Worker<Ingester>()(
   "OtelWorker",
   Stack.useSync(({ stage }) => ({
-    main: import.meta.filename,
+    main: import.meta.url,
     observability: { enabled: true },
     domain:
       stage === "prod"
-        ? ["otel.alchemy.run", "analytics.alchemy.run"]
+        ? { name: "otel.alchemy.run", aliases: ["analytics.alchemy.run"] }
         : undefined,
-    compatibility: {
-      date: "2026-03-17",
-      flags: ["nodejs_compat"],
-    },
   })),
   Effect.gen(function* () {
     const tokenValue = yield* (yield* IngestToken).token;

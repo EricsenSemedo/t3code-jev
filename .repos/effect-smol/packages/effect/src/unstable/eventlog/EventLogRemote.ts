@@ -1,22 +1,12 @@
 /**
- * Client-side remote replica support for writing event-log entries and
- * receiving change streams over the event-log RPC protocol.
+ * Connects a local event log to a remote replica.
  *
- * This module builds `EventLogRemote` services backed by `EventLogRemoteRpcs`.
- * It is used by local event logs that need to replicate entries to another
- * journal, subscribe to remote changes from a sequence number, or run effects
- * only after the current event-log identity has completed the remote
- * authentication handshake. The encrypted constructor is the default choice for
- * synchronizing browser, edge, or service replicas across an untrusted network,
- * while the unencrypted constructor is intended for trusted transports or tests.
- *
- * Remote sessions begin with `Hello` and `Authenticate`, cache authentication by
- * identity public key, and retry forbidden responses by refreshing the handshake.
- * The RPC transport must preserve a stable client session across hello,
- * authentication, writes, and change streams. Entries and change batches may be
- * split into protocol chunks, so callers should treat `changes` as a scoped
- * streaming queue and rely on the remote `Registry` registration instead of
- * manually sharing partially assembled payloads between sessions.
+ * `EventLogRemote` writes local entries to another journal, receives remote
+ * change streams from a sequence number, and can wait until the current
+ * event-log identity has completed remote authentication. The encrypted
+ * constructor is the default for browser, edge, or service replicas crossing an
+ * untrusted network. The unencrypted constructor is intended for trusted
+ * transports or tests.
  *
  * @since 4.0.0
  */
@@ -40,7 +30,7 @@ import {
   Authenticate,
   ChangesRpc,
   ChunkedMessage,
-  type EventLogProtocolError,
+  EventLogProtocolError,
   EventLogRemoteRpcs,
   type HelloResponse,
   type StoreId,
@@ -63,7 +53,7 @@ import { makeGetIdentityRootSecretMaterial } from "./internal/identityRootSecret
  * It can write local entries to the remote, stream remote changes from a sequence
  * number, and run effects only after the supplied identity has authenticated.
  *
- * @category tags
+ * @category services
  * @since 4.0.0
  */
 export class EventLogRemote extends Context.Service<EventLogRemote, {
@@ -93,7 +83,16 @@ export class EventLogRemote extends Context.Service<EventLogRemote, {
 export class EventLogRemoteError extends Data.TaggedError("EventLogRemoteError")<{
   readonly method: string
   readonly cause: unknown
-}> {}
+}> {
+  /**
+   * Returns `true` when the value is an `EventLogRemoteError`.
+   *
+   * @since 4.0.0
+   */
+  static is(u: unknown): u is EventLogRemoteError {
+    return Predicate.isTagged(u, "EventLogRemoteError")
+  }
+}
 
 const getIdentityRootSecretMaterial = makeGetIdentityRootSecretMaterial(globalThis.crypto)
 
@@ -129,7 +128,7 @@ const makeAuthenticate = Effect.fnUntraced(function*(options: {
  * Use to provide the RPC client used by remote event-log replicas to
  * authenticate, write entries, and subscribe to changes.
  *
- * @category RPC client
+ * @category services
  * @since 4.0.0
  */
 export class EventLogRemoteClient extends Context.Service<
@@ -216,8 +215,10 @@ export const makeWith = Effect.fnUntraced(function*({ encodeWrite, decodeChanges
     Effect.retry(effect, {
       while(e) {
         hello = null
-        const isForbidden = Predicate.isTagged(e, "EventLogProtocolError") &&
-          (e as any as EventLogProtocolError).code === "Forbidden"
+        const error = EventLogRemoteError.is(e) && e.method === "authenticate"
+          ? e.cause
+          : e
+        const isForbidden = EventLogProtocolError.is(error) && error.code === "Forbidden"
         return Cache.invalidate(authCache, options.identity.publicKey).pipe(
           Effect.as(isForbidden)
         )
@@ -317,14 +318,14 @@ export const makeEncrypted = Effect.gen(function*(): Effect.fn.Return<
   return yield* makeWith({
     encodeWrite: (options) =>
       encryption.encrypt(options.identity, options.entries).pipe(
-        Effect.flatMap((msg) =>
+        Effect.flatMap((encryptedEntries) =>
           new WriteEntries({
             publicKey: options.identity.publicKey,
             storeId: options.storeId,
-            iv: msg.iv,
-            encryptedEntries: msg.encryptedEntries.map((entry, i) => ({
+            encryptedEntries: encryptedEntries.map((entry, i) => ({
               entryId: options.entries[i].id,
-              encryptedEntry: entry
+              iv: entry.iv,
+              encryptedEntry: entry.encryptedEntry
             }))
           }).encoded
         )

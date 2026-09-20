@@ -5,13 +5,14 @@ import * as Option from "effect/Option";
 import { BearerConnectionProfile, type ConnectionCatalogEntry } from "./catalog.ts";
 import {
   BearerConnectionTarget,
+  ConnectionBlockedError,
   ConnectionTransientError,
   type SupervisorConnectionState,
 } from "./model.ts";
 import {
   connectionCatalogDisplayUrl,
-  connectionPhaseMessage,
   connectionStatusText,
+  connectionStatusTitle,
   presentEnvironmentConnection,
   presentConnectionState,
 } from "./presentation.ts";
@@ -33,6 +34,7 @@ const ENTRY: ConnectionCatalogEntry = {
       wsBaseUrl: "wss://environment.example.test",
     }),
   ),
+  enabled: true,
 };
 
 function supervisorState(overrides: Partial<SupervisorConnectionState>): SupervisorConnectionState {
@@ -50,6 +52,21 @@ function supervisorState(overrides: Partial<SupervisorConnectionState>): Supervi
 }
 
 describe("connection presentation", () => {
+  it("labels a blocked protocol as unsupported", () => {
+    const connection = presentConnectionState(
+      supervisorState({
+        phase: "blocked",
+        lastFailure: new ConnectionBlockedError({
+          reason: "unsupported",
+          detail: "Update your app.",
+        }),
+      }),
+    );
+    expect(connection.phase).toBe("unsupported");
+    expect(connection.error).toBe("Update your app.");
+    expect(connectionStatusText(connection)).toBe("Client not supported");
+  });
+
   it("preserves profile display information without exposing credentials", () => {
     expect(connectionCatalogDisplayUrl(ENTRY)).toBe("https://environment.example.test");
   });
@@ -118,18 +135,16 @@ describe("connection presentation", () => {
     });
   });
 
-  it("gives offline status precedence in global messaging", () => {
-    expect(connectionPhaseMessage("connected", TARGET.label, "offline")).toBe("You are offline");
-  });
-
   it("combines reconnect progress with the latest failure", () => {
-    expect(
-      connectionStatusText({
-        phase: "reconnecting",
-        error: "Relay request timed out.",
-        traceId: "trace-retry",
-      }),
-    ).toBe("Failed to connect. Reconnecting... Reason: Relay request timed out.");
+    const connection = {
+      phase: "reconnecting",
+      error: "Relay request timed out.",
+      traceId: "trace-retry",
+    } as const;
+    expect(connectionStatusText(connection)).toBe(
+      "Failed to connect. Reconnecting... Reason: Relay request timed out.",
+    );
+    expect(connectionStatusTitle(connection)).toBe("Failed to connect. Reconnecting...");
   });
 
   it("presents the supervisor's offline state without consulting shell state", () => {

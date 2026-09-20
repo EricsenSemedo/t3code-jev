@@ -26,10 +26,12 @@ const KNOWN_SHARED_DIRECTORIES = [
   "plugins",
   "cache",
   "logs",
+  "mcp-oauth-locks",
 ] as const;
 
 const PRIVATE_ENTRY_NAMES = new Set(["auth.json", "models_cache.json"]);
 const SHADOW_LOCAL_ENTRY_NAMES = new Set(["log", "memories", "tmp"]);
+const REPLACEABLE_SHARED_RUNTIME_DIRECTORIES = new Set(["mcp-oauth-locks"]);
 
 function resolveHomePath(path: Path.Path, value: string | undefined): string {
   const expanded =
@@ -68,7 +70,7 @@ const CodexShadowHomeContext = {
   effectiveHomePath: Schema.String,
 };
 
-export class CodexShadowHomeFileSystemError extends Schema.TaggedErrorClass<CodexShadowHomeFileSystemError>()(
+export class CodexShadowHomeFileSystemError extends Schema.TaggedError<CodexShadowHomeFileSystemError>()(
   "CodexShadowHomeFileSystemError",
   {
     ...CodexShadowHomeContext,
@@ -85,7 +87,7 @@ export class CodexShadowHomeFileSystemError extends Schema.TaggedErrorClass<Code
   }
 }
 
-export class CodexShadowHomePathConflictError extends Schema.TaggedErrorClass<CodexShadowHomePathConflictError>()(
+export class CodexShadowHomePathConflictError extends Schema.TaggedError<CodexShadowHomePathConflictError>()(
   "CodexShadowHomePathConflictError",
   CodexShadowHomeContext,
 ) {
@@ -94,7 +96,7 @@ export class CodexShadowHomePathConflictError extends Schema.TaggedErrorClass<Co
   }
 }
 
-export class CodexShadowHomeEntryConflictError extends Schema.TaggedErrorClass<CodexShadowHomeEntryConflictError>()(
+export class CodexShadowHomeEntryConflictError extends Schema.TaggedError<CodexShadowHomeEntryConflictError>()(
   "CodexShadowHomeEntryConflictError",
   {
     ...CodexShadowHomeContext,
@@ -108,7 +110,7 @@ export class CodexShadowHomeEntryConflictError extends Schema.TaggedErrorClass<C
   }
 }
 
-export class CodexShadowHomePrivateEntrySymlinkError extends Schema.TaggedErrorClass<CodexShadowHomePrivateEntrySymlinkError>()(
+export class CodexShadowHomePrivateEntrySymlinkError extends Schema.TaggedError<CodexShadowHomePrivateEntrySymlinkError>()(
   "CodexShadowHomePrivateEntrySymlinkError",
   {
     ...CodexShadowHomeContext,
@@ -225,16 +227,6 @@ const ensureSymlink = Effect.fn("CodexHomeLayout.ensureSymlink")(function* (inpu
     linkPath: link,
   });
 
-  if (state._tag === "NotSymlink") {
-    return yield* new CodexShadowHomeEntryConflictError({
-      sharedHomePath: input.sharedHomePath,
-      effectiveHomePath: input.effectiveHomePath,
-      entryName: input.entryName,
-      linkPath: link,
-      targetPath: target,
-    });
-  }
-
   const createLink = input.fileSystem.symlink(target, link).pipe(
     Effect.catchTags({
       PlatformError: (cause) =>
@@ -249,6 +241,33 @@ const ensureSymlink = Effect.fn("CodexHomeLayout.ensureSymlink")(function* (inpu
         }),
     }),
   );
+
+  if (state._tag === "NotSymlink") {
+    if (!REPLACEABLE_SHARED_RUNTIME_DIRECTORIES.has(input.entryName)) {
+      return yield* new CodexShadowHomeEntryConflictError({
+        sharedHomePath: input.sharedHomePath,
+        effectiveHomePath: input.effectiveHomePath,
+        entryName: input.entryName,
+        linkPath: link,
+        targetPath: target,
+      });
+    }
+
+    yield* input.fileSystem.remove(link, { recursive: true }).pipe(
+      Effect.catchTags({
+        PlatformError: (cause) =>
+          new CodexShadowHomeFileSystemError({
+            sharedHomePath: input.sharedHomePath,
+            effectiveHomePath: input.effectiveHomePath,
+            operation: "remove",
+            path: link,
+            entryName: input.entryName,
+            cause,
+          }),
+      }),
+    );
+    return yield* createLink;
+  }
 
   if (state._tag === "Missing") {
     return yield* createLink;

@@ -6,30 +6,6 @@
  * ping messages, and metric snapshots through a socket, then exposes tracer
  * layers that forward telemetry while preserving the current tracer's behavior.
  *
- * **Mental model**
- *
- * {@link make} creates the scoped client service over the provided `Socket`;
- * {@link makeTracer} wraps the current tracer and sends each span update
- * through that client; {@link layerTracer} combines both steps for integrations
- * that already have a socket transport. The higher-level `DevTools` module
- * provides WebSocket defaults for applications.
- *
- * **Common tasks**
- *
- * - Build the client service directly with {@link make} or {@link layer}
- * - Install only the forwarding tracer with {@link makeTracer}
- * - Create the client and tracer together with {@link layerTracer}
- * - Send custom span or span-event messages through `DevToolsClient.sendUnsafe`
- *
- * **Gotchas**
- *
- * - The client is scoped because it starts background fibers for the socket
- *   stream and heartbeat.
- * - `sendUnsafe` enqueues telemetry without back pressure and should stay on
- *   the tracer hot path.
- * - This module does not create a socket transport; provide `Socket` yourself
- *   or use the higher-level `DevTools` module.
- *
  * @since 4.0.0
  */
 import * as Cause from "../../Cause.ts"
@@ -55,7 +31,7 @@ const ResponseSchema = Schema.toCodecJson(DevToolsSchema.Response)
  * Service for sending span and span-event telemetry to the Effect devtools
  * connection.
  *
- * @category tags
+ * @category services
  * @since 4.0.0
  */
 export class DevToolsClient extends Context.Service<
@@ -201,6 +177,17 @@ export const make: Effect.Effect<
  */
 export const layer: Layer.Layer<DevToolsClient, never, Socket.Socket> = Layer.effect(DevToolsClient, make)
 
+const spanSnapshot = (span: Tracer.Span): DevToolsSchema.Span => ({
+  _tag: "Span",
+  spanId: span.spanId,
+  traceId: span.traceId,
+  name: span.name,
+  sampled: span.sampled,
+  attributes: new Map(span.attributes),
+  status: span.status,
+  parent: span.parent
+})
+
 const makeTracerEffect = Effect.gen(function*() {
   const client = yield* DevToolsClient
   const currentTracer = yield* Effect.tracer
@@ -208,7 +195,7 @@ const makeTracerEffect = Effect.gen(function*() {
   return Tracer.make({
     span(options) {
       const span = currentTracer.span(options)
-      client.sendUnsafe(span)
+      client.sendUnsafe(spanSnapshot(span))
       const oldEvent = span.event
       span.event = function(this: Tracer.Span, name, startTime, attributes) {
         client.sendUnsafe({
@@ -225,7 +212,7 @@ const makeTracerEffect = Effect.gen(function*() {
       const oldEnd = span.end
       span.end = function(this: Tracer.Span, endTime, exit) {
         oldEnd.call(this, endTime, exit)
-        client.sendUnsafe(span)
+        client.sendUnsafe(spanSnapshot(span))
       }
 
       return span

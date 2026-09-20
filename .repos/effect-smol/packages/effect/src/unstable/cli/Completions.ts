@@ -4,30 +4,6 @@
  * low-level script generation surface used by the unstable CLI package and by
  * the built-in completions global flag.
  *
- * **Mental model**
- *
- * - {@link CommandDescriptor} is a shell-agnostic tree of commands,
- *   subcommands, flags, and positional arguments.
- * - {@link FlagDescriptor} and {@link ArgumentDescriptor} carry just enough
- *   metadata for shells to complete names, choices, paths, and value-shaped
- *   arguments.
- * - {@link generate} selects the shell-specific generator and returns a static
- *   script string for one executable name.
- *
- * **Common tasks**
- *
- * - Generate an installable completion script with {@link generate}.
- * - Preserve help text in completions by filling descriptor descriptions.
- * - Use `Choice` descriptors for finite values and `Path` descriptors when the
- *   shell should complete files or directories.
- *
- * **Gotchas**
- *
- * - This module does not inspect a `Command` directly; it consumes an already
- *   built {@link CommandDescriptor}.
- * - Generated scripts are returned as strings. Printing, installing, or caching
- *   those scripts is handled by the caller.
- *
  * @since 4.0.0
  */
 import * as Bash from "./internal/completions/bash.ts"
@@ -78,8 +54,8 @@ export interface FlagDescriptor {
 export type FlagType =
   | { readonly _tag: "Boolean" }
   | { readonly _tag: "String" }
-  | { readonly _tag: "Integer" }
-  | { readonly _tag: "Float" }
+  | { readonly _tag: "Int" }
+  | { readonly _tag: "Finite" }
   | { readonly _tag: "Date" }
   | { readonly _tag: "Choice"; readonly values: ReadonlyArray<string> }
   | { readonly _tag: "Path"; readonly pathType: "file" | "directory" | "either" }
@@ -106,8 +82,8 @@ export interface ArgumentDescriptor {
  */
 export type ArgumentType =
   | { readonly _tag: "String" }
-  | { readonly _tag: "Integer" }
-  | { readonly _tag: "Float" }
+  | { readonly _tag: "Int" }
+  | { readonly _tag: "Finite" }
   | { readonly _tag: "Date" }
   | { readonly _tag: "Choice"; readonly values: ReadonlyArray<string> }
   | { readonly _tag: "Path"; readonly pathType: "file" | "directory" | "either" }
@@ -117,7 +93,7 @@ export type ArgumentType =
  *
  * **When to use**
  *
- * Use to produce an installable completion script when you already have a
+ * Use when you need an installable completion script from an existing
  * `CommandDescriptor`.
  *
  * **Details**

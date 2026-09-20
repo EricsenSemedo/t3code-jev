@@ -188,6 +188,7 @@ function makeAllocations(
     tunnelName: "tunnel-name",
     dnsRecordId: "dns-record-id",
     readyAt: "2026-05-25T00:00:00.000Z",
+    updatedAt: "2026-05-25T00:00:00.000Z",
   },
 ): ManagedEndpointAllocations.ManagedEndpointAllocations["Service"] {
   return {
@@ -196,7 +197,10 @@ function makeAllocations(
     recordTunnel: () => Effect.die("unused"),
     recordDns: () => Effect.die("unused"),
     markReady: () => Effect.die("unused"),
+    claimRelease: () => Effect.die("unused"),
+    claimDeprovision: () => Effect.die("unused"),
     remove: () => Effect.die("unused"),
+    removeClaimed: () => Effect.die("unused"),
   };
 }
 
@@ -205,9 +209,7 @@ function makeLinks(
 ): EnvironmentLinks.EnvironmentLinks["Service"] {
   return {
     upsert: () => Effect.void,
-    listUsersForEnvironment: () => Effect.succeed([]),
     listDeliveryUsersForEnvironment: () => Effect.succeed([]),
-    listPublicKeysForEnvironment: () => Effect.succeed([environmentKeyPair.publicKey]),
     listForUser: () => Effect.succeed([]),
     getForUser: () =>
       Effect.succeed({
@@ -467,6 +469,7 @@ describe("EnvironmentConnector", () => {
             tunnelName: "tunnel-name",
             dnsRecordId: "dns-record-id",
             readyAt: null,
+            updatedAt: "2026-05-25T00:00:00.000Z",
           }),
         }),
       ),

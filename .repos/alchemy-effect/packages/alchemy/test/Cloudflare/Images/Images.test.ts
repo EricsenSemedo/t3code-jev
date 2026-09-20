@@ -1,6 +1,6 @@
 import * as Cloudflare from "@/Cloudflare";
-import * as Test from "@/Test/Vitest";
-import { expect } from "@effect/vitest";
+import * as Test from "@/Test/Alchemy";
+import { expect } from "alchemy-test";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as Schedule from "effect/Schedule";
@@ -37,7 +37,13 @@ const TINY_PNG = new Uint8Array(
 // answers 200 (and surface its body if it doesn't, so a real failure isn't
 // hidden by the retry loop).
 const looksLikeCloudflarePlaceholder = (body: string) =>
-  body.includes("There is nothing here yet") || /Error\s+\d{3,4}/i.test(body);
+  body.includes("There is nothing here yet") ||
+  // The "Error 1104 / Script not found" page renders the word "Error" and
+  // the code in separate HTML tags, so match the page's own markers rather
+  // than a contiguous "Error NNNN" string.
+  body.includes("Script not found") ||
+  body.includes("cf-error-code") ||
+  /Error\s+\d{3,4}/i.test(body);
 
 const postImage = (url: string) =>
   HttpClient.execute(
@@ -61,10 +67,13 @@ const postImage = (url: string) =>
           looksLikeCloudflarePlaceholder(e.body)),
       // Cap each backoff at 5s (otherwise the exponential blows past a minute
       // per sleep and looks like a hang) and stop after 30 attempts.
-      schedule: Schedule.exponential("500 millis").pipe(
-        Schedule.either(Schedule.spaced("5 seconds")),
-        Schedule.both(Schedule.recurs(30)),
-      ),
+      schedule: Schedule.max([
+        Schedule.min([
+          Schedule.exponential("500 millis"),
+          Schedule.spaced("5 seconds"),
+        ]),
+        Schedule.recurs(30),
+      ]),
     }),
   );
 

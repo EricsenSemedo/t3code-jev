@@ -5,6 +5,7 @@ import {
   type EnvironmentInternalError,
   type EnvironmentOperationForbiddenError,
   type EnvironmentRequestInvalidError,
+  type EnvironmentResourceNotFoundError,
   type EnvironmentScopeRequiredError,
 } from "@t3tools/contracts";
 import { httpHeaderRedactionLayer } from "@t3tools/shared/httpObservability";
@@ -70,6 +71,7 @@ export type RemoteEnvironmentRequestError =
   | EnvironmentAuthInvalidError
   | EnvironmentScopeRequiredError
   | EnvironmentOperationForbiddenError
+  | EnvironmentResourceNotFoundError
   | EnvironmentInternalError
   | RemoteEnvironmentAuthFetchError
   | RemoteEnvironmentAuthInvalidJsonError
@@ -94,6 +96,26 @@ const remoteApiBaseUrl = (httpBaseUrl: string): string => {
 
 export const makeEnvironmentHttpApiClient = (httpBaseUrl: string) =>
   HttpApiClient.make(EnvironmentHttpApi, {
+    baseUrl: remoteApiBaseUrl(httpBaseUrl),
+  });
+
+export const makeEnvironmentHttpApiGroupClient = <
+  Group extends keyof typeof EnvironmentHttpApi.groups,
+>(
+  httpBaseUrl: string,
+  group: Group,
+) =>
+  Effect.flatMap(HttpClient.HttpClient, (httpClient) =>
+    HttpApiClient.group(EnvironmentHttpApi, {
+      httpClient,
+      group,
+      baseUrl: remoteApiBaseUrl(httpBaseUrl),
+    }),
+  );
+
+/** Contract-derived request URLs for authentication proofs, tracing, and structured errors. */
+export const makeEnvironmentHttpApiUrlBuilder = (httpBaseUrl: string) =>
+  HttpApiClient.urlBuilder(EnvironmentHttpApi, {
     baseUrl: remoteApiBaseUrl(httpBaseUrl),
   });
 

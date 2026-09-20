@@ -12,8 +12,8 @@ const PHASES: { id: Phase; label: string }[] = [
 ];
 
 const RESOURCES = [
-  { id: "Photos", type: "Cloudflare.R2Bucket" },
-  { id: "Sessions", type: "Cloudflare.KVNamespace" },
+  { id: "Photos", type: "Cloudflare.R2.Bucket" },
+  { id: "Sessions", type: "Cloudflare.KV.Namespace" },
   { id: "Api", type: "Cloudflare.Worker" },
 ];
 
@@ -150,7 +150,7 @@ export default function PRLifecycle() {
             : "DESTROY";
 
   return (
-    <div className="pr-lc">
+    <div className="pr-lc" data-nosnippet="">
       <ol className="pr-lc__timeline" aria-label="PR lifecycle">
         {PHASES.map((p, i) => {
           const activeIdx = PHASES.findIndex((x) => x.id === phase);

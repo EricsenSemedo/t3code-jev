@@ -1,6 +1,7 @@
 import type { ConfigError } from "effect/Config";
 import { ConfigProvider } from "effect/ConfigProvider";
 import * as Context from "effect/Context";
+import type { Crypto } from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import { FileSystem } from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -13,15 +14,20 @@ import type { HttpClient } from "effect/unstable/http/HttpClient";
 import type { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner";
 import type { ActionLike } from "./Action.ts";
 import { AlchemyContext, AlchemyContextLive } from "./AlchemyContext.ts";
-import { provideFreshArtifactStore } from "./Artifacts.ts";
+import { type ArtifactStore, provideFreshArtifactStore } from "./Artifacts.ts";
 import { AuthProviders } from "./Auth/AuthProvider.ts";
 import { CredentialsStore, CredentialsStoreLive } from "./Auth/Credentials.ts";
-import { Profile, ProfileLive } from "./Auth/Profile.ts";
-import { Cli } from "./Cli/Cli.ts";
+import { ProfileStore, ProfileStoreLive } from "./Auth/Profile.ts";
+// Type-only: with verbatimModuleSyntax a value import would survive emit and
+// drag the terminal helpers (node:tty, Sigil's ansi helpers) into every unbundled
+// child process that loads Stack.ts.
+import type { Interaction } from "./Interaction.ts";
 import type { Input, InputProps } from "./Input.ts";
 import * as Output from "./Output.ts";
+import type { Provider, ProviderCollectionLike } from "./Provider.ts";
 import type { ResourceBinding, ResourceLike } from "./Resource.ts";
 import { Stage } from "./Stage.ts";
+import { StackContext } from "./StackContext.ts";
 import type { State } from "./State/State.ts";
 import { loadConfigProvider } from "./Util/ConfigProvider.ts";
 import { effectClass, taggedFunction } from "./Util/effect.ts";
@@ -33,14 +39,37 @@ export type StackServices =
   | Stage
   | Scope.Scope
   | FileSystem
+  | Crypto
   | Path
   | AlchemyContext
   | HttpClient
   | ChildProcessSpawner
   | AuthProviders
-  | Profile
+  | ProfileStore
+  | ArtifactStore
   | CredentialsStore
-  | Cli;
+  | Interaction;
+
+export type ProviderServices =
+  | ProviderCollectionLike
+  | Provider<any>
+  | EnvironmentLike
+  | CredentialsLike
+  | DockerLike;
+
+// tagged type to allow types like AWSEnvironment/AWS Region to bubble through
+export interface EnvironmentLike {
+  readonly kind: "Environment";
+}
+
+// tagged type to allow types like AWS Credentials to bubble through
+export interface CredentialsLike {
+  readonly kind: "Credentials";
+}
+
+export interface DockerLike {
+  readonly key: "@alchemy/Docker";
+}
 
 export type StackEffect<A, Err = never, Req = never> = Effect.Effect<
   A,
@@ -50,9 +79,10 @@ export type StackEffect<A, Err = never, Req = never> = Effect.Effect<
   | Scope.Scope
   | AuthProviders
   | AlchemyContext
-  | Cli
-  | Profile
+  | Interaction
+  | ProfileStore
   | CredentialsStore
+  | ArtifactStore
   | State
   | Req
 >;
@@ -63,7 +93,7 @@ export type Stack = Context.ServiceClass.Shape<
 >;
 
 export interface StackProps<Req> {
-  providers: Layer.Layer<NoInfer<Req>, never, StackServices>;
+  providers: Layer.Layer<Extract<Req, ProviderServices>, never, StackServices>;
   state: Layer.Layer<State, never, StackServices>;
 }
 
@@ -95,7 +125,6 @@ export const Stack: Context.ServiceClass<
     };
   };
   <Self, Shape>(): {
-    Shape: Shape;
     (stackName: string): Effect.Effect<Self> & {
       new (_: never): Output.ToOutput<Shape>;
       make: <A, Req>(
@@ -107,14 +136,14 @@ export const Stack: Context.ServiceClass<
       };
     };
   };
-  <A, Req>(
+  <A, Req extends StackServices | ProviderServices = never>(
     stackName: string,
     options: StackProps<NoInfer<Req>>,
-    eff: Effect.Effect<A, ConfigError, Req | StackServices>,
+    eff: Effect.Effect<A, ConfigError, Req>,
   ): Effect.Effect<CompiledStack<A>, ConfigError>;
 } = Object.assign(
   taggedFunction(
-    Context.Service<Stack, Omit<StackSpec, "output">>()("Stack"),
+    StackContext,
     <A, Req>(
       stackName?: string,
       options?: StackProps<NoInfer<Req>>,
@@ -133,11 +162,14 @@ export const Stack: Context.ServiceClass<
               make: <Req = never>(
                 options: StackProps<NoInfer<Req>>,
                 eff: Effect.Effect<A, ConfigError, Req>,
-              ) => Stack(stackName, options, eff),
+              ) =>
+                // @ts-expect-error
+                Stack(stackName, options, eff),
             },
           );
       }
       return eff!.pipe(
+        // @ts-expect-error
         make({
           name: stackName,
           ...options!,
@@ -212,7 +244,7 @@ export const make =
                 `    providers: Cloudflare.providers(),\n` +
                 `    state: Cloudflare.state(), // <-- required\n` +
                 `  }, ...)\n` +
-                `See https://v2.alchemy.run/concepts/state-store for available state stores.`,
+                `See https://alchemy.run/state-store for available state stores.`,
             ),
           );
         }
@@ -279,13 +311,12 @@ const platform = Layer.mergeAll(
   PlatformServices,
   FetchHttpClient.layer,
   Logger.layer([fileLogger("out")], { mergeWithExisting: true }),
-  Layer.provide(ProfileLive, PlatformServices),
+  Layer.provide(ProfileStoreLive, PlatformServices),
   Layer.provide(CredentialsStoreLive, PlatformServices),
 );
 // override alchemy state store, CLI/reporting, state, and Config
 const alchemy = (overrides?: { dev?: boolean }) =>
   Layer.mergeAll(
-    // CLI.inkCLI(),
     // optional
     overrides?.dev
       ? Layer.provide(
@@ -321,8 +352,11 @@ export const evalStack = <A, B, StackErr, Err, Req>(
 
     return yield* fn(stack).pipe(
       provideFreshArtifactStore,
-      Effect.provide(stack.services),
-      Effect.provide(Layer.succeed(ConfigProvider, configProvider)),
+      Effect.provide(
+        Layer.succeedContext(stack.services).pipe(
+          Layer.provideMerge(Layer.succeed(ConfigProvider, configProvider)),
+        ),
+      ),
     );
   }).pipe(
     Effect.provide(
@@ -331,10 +365,13 @@ export const evalStack = <A, B, StackErr, Err, Req>(
         Effect.serviceOption(AuthProviders).pipe(
           Effect.map(Option.getOrElse(() => ({}))),
         ),
+      ).pipe(
+        Layer.provideMerge(Layer.succeed(Stage, options.stage)),
+        Layer.provideMerge(
+          Layer.provideMerge(alchemy({ dev: options.dev }), platform),
+        ),
       ),
     ),
-    Effect.provide(Layer.succeed(Stage, options.stage)),
-    Effect.provide(Layer.provideMerge(alchemy({ dev: options.dev }), platform)),
   );
 
   return options.scope === undefined

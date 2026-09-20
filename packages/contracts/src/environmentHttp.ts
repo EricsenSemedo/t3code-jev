@@ -24,13 +24,26 @@ import {
   AuthWebSocketTicketResult,
   ServerAuthSessionMethod,
 } from "./auth.ts";
-import { AuthSessionId, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import {
+  DpopFailureReason,
+  AuthSessionId,
+  ThreadId,
+  TrimmedNonEmptyString,
+} from "./baseSchemas.ts";
 import { ExecutionEnvironmentDescriptor } from "./environment.ts";
 import {
   ClientOrchestrationCommand,
   DispatchResult,
   OrchestrationReadModel,
+  OrchestrationShellSnapshot,
+  OrchestrationThreadDetailSnapshot,
 } from "./orchestration.ts";
+import {
+  PullRequestDiffInput,
+  PullRequestDiffResult,
+  PullRequestOperationError,
+  PullRequestUnavailableError,
+} from "./pullRequest.ts";
 import {
   RelayCloudEnvironmentHealthRequest,
   RelayCloudMintCredentialRequest,
@@ -80,12 +93,13 @@ export const EnvironmentInternalErrorReason = Schema.Literals([
   "client_sessions_load_failed",
   "client_session_revoke_failed",
   "orchestration_snapshot_failed",
+  "orchestration_thread_snapshot_failed",
   "orchestration_dispatch_failed",
   "internal_error",
 ]);
 export type EnvironmentInternalErrorReason = typeof EnvironmentInternalErrorReason.Type;
 
-export class EnvironmentRequestInvalidError extends Schema.TaggedErrorClass<EnvironmentRequestInvalidError>()(
+export class EnvironmentRequestInvalidError extends Schema.TaggedError<EnvironmentRequestInvalidError>()(
   "EnvironmentRequestInvalidError",
   {
     code: Schema.Literal("invalid_request"),
@@ -97,13 +111,19 @@ export class EnvironmentRequestInvalidError extends Schema.TaggedErrorClass<Envi
   [HttpServerRespondable.symbol]() {
     return HttpServerResponse.schemaJson(EnvironmentRequestInvalidError)(this, { status: 400 });
   }
+
+  override get message(): string {
+    return `The environment rejected the request (${this.reason}).`;
+  }
 }
 
-export class EnvironmentAuthInvalidError extends Schema.TaggedErrorClass<EnvironmentAuthInvalidError>()(
+export class EnvironmentAuthInvalidError extends Schema.TaggedError<EnvironmentAuthInvalidError>()(
   "EnvironmentAuthInvalidError",
   {
     code: Schema.Literal("auth_invalid"),
     reason: EnvironmentAuthInvalidReason,
+    // Older servers do not send a DPoP failure category.
+    dpopFailureReason: Schema.optionalKey(DpopFailureReason),
     traceId: TrimmedNonEmptyString,
   },
   { httpApiStatus: 401 },
@@ -111,9 +131,13 @@ export class EnvironmentAuthInvalidError extends Schema.TaggedErrorClass<Environ
   [HttpServerRespondable.symbol]() {
     return HttpServerResponse.schemaJson(EnvironmentAuthInvalidError)(this, { status: 401 });
   }
+
+  override get message(): string {
+    return `The environment rejected this client's credentials (${this.reason}).`;
+  }
 }
 
-export class EnvironmentScopeRequiredError extends Schema.TaggedErrorClass<EnvironmentScopeRequiredError>()(
+export class EnvironmentScopeRequiredError extends Schema.TaggedError<EnvironmentScopeRequiredError>()(
   "EnvironmentScopeRequiredError",
   {
     code: Schema.Literal("insufficient_scope"),
@@ -125,9 +149,13 @@ export class EnvironmentScopeRequiredError extends Schema.TaggedErrorClass<Envir
   [HttpServerRespondable.symbol]() {
     return HttpServerResponse.schemaJson(EnvironmentScopeRequiredError)(this, { status: 403 });
   }
+
+  override get message(): string {
+    return `This request needs the ${this.requiredScope} scope, which this client does not have.`;
+  }
 }
 
-export class EnvironmentOperationForbiddenError extends Schema.TaggedErrorClass<EnvironmentOperationForbiddenError>()(
+export class EnvironmentOperationForbiddenError extends Schema.TaggedError<EnvironmentOperationForbiddenError>()(
   "EnvironmentOperationForbiddenError",
   {
     code: Schema.Literal("operation_forbidden"),
@@ -139,9 +167,13 @@ export class EnvironmentOperationForbiddenError extends Schema.TaggedErrorClass<
   [HttpServerRespondable.symbol]() {
     return HttpServerResponse.schemaJson(EnvironmentOperationForbiddenError)(this, { status: 403 });
   }
+
+  override get message(): string {
+    return `The environment refused this operation (${this.reason}).`;
+  }
 }
 
-export class EnvironmentInternalError extends Schema.TaggedErrorClass<EnvironmentInternalError>()(
+export class EnvironmentInternalError extends Schema.TaggedError<EnvironmentInternalError>()(
   "EnvironmentInternalError",
   {
     code: Schema.Literal("internal_error"),
@@ -153,6 +185,31 @@ export class EnvironmentInternalError extends Schema.TaggedErrorClass<Environmen
   [HttpServerRespondable.symbol]() {
     return HttpServerResponse.schemaJson(EnvironmentInternalError)(this, { status: 500 });
   }
+
+  override get message(): string {
+    return `The environment failed to answer this request (${this.reason}).`;
+  }
+}
+
+export const EnvironmentResourceNotFoundReason = Schema.Literals(["thread_not_found"]);
+export type EnvironmentResourceNotFoundReason = typeof EnvironmentResourceNotFoundReason.Type;
+
+export class EnvironmentResourceNotFoundError extends Schema.TaggedError<EnvironmentResourceNotFoundError>()(
+  "EnvironmentResourceNotFoundError",
+  {
+    code: Schema.Literal("not_found"),
+    reason: EnvironmentResourceNotFoundReason,
+    traceId: TrimmedNonEmptyString,
+  },
+  { httpApiStatus: 404 },
+) {
+  [HttpServerRespondable.symbol]() {
+    return HttpServerResponse.schemaJson(EnvironmentResourceNotFoundError)(this, { status: 404 });
+  }
+
+  override get message(): string {
+    return `The environment could not find what this request named (${this.reason}).`;
+  }
 }
 
 export const EnvironmentHttpCommonError = Schema.Union([
@@ -160,6 +217,7 @@ export const EnvironmentHttpCommonError = Schema.Union([
   EnvironmentAuthInvalidError,
   EnvironmentScopeRequiredError,
   EnvironmentOperationForbiddenError,
+  EnvironmentResourceNotFoundError,
   EnvironmentInternalError,
 ]);
 export type EnvironmentHttpCommonError = typeof EnvironmentHttpCommonError.Type;
@@ -169,7 +227,7 @@ const EnvironmentAuthenticationErrors = [
   EnvironmentInternalError,
 ] as const;
 
-export class EnvironmentHttpBadRequestError extends Schema.TaggedErrorClass<EnvironmentHttpBadRequestError>()(
+export class EnvironmentHttpBadRequestError extends Schema.TaggedError<EnvironmentHttpBadRequestError>()(
   "EnvironmentHttpBadRequestError",
   {
     message: Schema.String,
@@ -181,7 +239,7 @@ export class EnvironmentHttpBadRequestError extends Schema.TaggedErrorClass<Envi
   }
 }
 
-export class EnvironmentHttpUnauthorizedError extends Schema.TaggedErrorClass<EnvironmentHttpUnauthorizedError>()(
+export class EnvironmentHttpUnauthorizedError extends Schema.TaggedError<EnvironmentHttpUnauthorizedError>()(
   "EnvironmentHttpUnauthorizedError",
   {
     message: Schema.String,
@@ -193,7 +251,7 @@ export class EnvironmentHttpUnauthorizedError extends Schema.TaggedErrorClass<En
   }
 }
 
-export class EnvironmentHttpForbiddenError extends Schema.TaggedErrorClass<EnvironmentHttpForbiddenError>()(
+export class EnvironmentHttpForbiddenError extends Schema.TaggedError<EnvironmentHttpForbiddenError>()(
   "EnvironmentHttpForbiddenError",
   {
     message: Schema.String,
@@ -205,7 +263,7 @@ export class EnvironmentHttpForbiddenError extends Schema.TaggedErrorClass<Envir
   }
 }
 
-export class EnvironmentHttpInternalServerError extends Schema.TaggedErrorClass<EnvironmentHttpInternalServerError>()(
+export class EnvironmentHttpInternalServerError extends Schema.TaggedError<EnvironmentHttpInternalServerError>()(
   "EnvironmentHttpInternalServerError",
   {
     message: Schema.String,
@@ -217,7 +275,7 @@ export class EnvironmentHttpInternalServerError extends Schema.TaggedErrorClass<
   }
 }
 
-export class EnvironmentHttpConflictError extends Schema.TaggedErrorClass<EnvironmentHttpConflictError>()(
+export class EnvironmentHttpConflictError extends Schema.TaggedError<EnvironmentHttpConflictError>()(
   "EnvironmentHttpConflictError",
   {
     message: Schema.String,
@@ -229,7 +287,7 @@ export class EnvironmentHttpConflictError extends Schema.TaggedErrorClass<Enviro
   }
 }
 
-export class EnvironmentCloudEndpointUnavailableError extends Schema.TaggedErrorClass<EnvironmentCloudEndpointUnavailableError>()(
+export class EnvironmentCloudEndpointUnavailableError extends Schema.TaggedError<EnvironmentCloudEndpointUnavailableError>()(
   "EnvironmentCloudEndpointUnavailableError",
   {
     message: Schema.String,
@@ -267,6 +325,11 @@ const EnvironmentSessionRevokeErrors = [
 ] as const;
 const EnvironmentOrchestrationSnapshotErrors = [
   EnvironmentScopeRequiredError,
+  EnvironmentInternalError,
+] as const;
+const EnvironmentOrchestrationThreadSnapshotErrors = [
+  EnvironmentScopeRequiredError,
+  EnvironmentResourceNotFoundError,
   EnvironmentInternalError,
 ] as const;
 const EnvironmentOrchestrationDispatchErrors = [
@@ -316,6 +379,11 @@ export const EnvironmentCloudLinkStateResult = Schema.Struct({
   cloudUserId: Schema.NullOr(Schema.String),
   relayUrl: Schema.NullOr(Schema.String),
   relayIssuer: Schema.NullOr(Schema.String),
+  // A managed Cloudflare tunnel is provisioned for this link. False for a
+  // publish-only link (activity publishing without a relay-managed tunnel), so
+  // clients can present the two capabilities as independent settings.
+  // Optional so newer clients tolerate older environment servers.
+  managedTunnelActive: Schema.optional(Schema.Boolean),
   publishAgentActivity: Schema.Boolean,
 });
 export type EnvironmentCloudLinkStateResult = typeof EnvironmentCloudLinkStateResult.Type;
@@ -340,13 +408,13 @@ export const AuthOtherClientSessionsRevokeResult = Schema.Struct({
 });
 export type AuthOtherClientSessionsRevokeResult = typeof AuthOtherClientSessionsRevokeResult.Type;
 
-export class EnvironmentMetadataHttpApi extends HttpApiGroup.make("metadata").add(
+class EnvironmentMetadataHttpApi extends HttpApiGroup.make("metadata").add(
   HttpApiEndpoint.get("descriptor", "/.well-known/t3/environment", {
     success: ExecutionEnvironmentDescriptor,
   }),
 ) {}
 
-export class EnvironmentAuthHttpApi extends HttpApiGroup.make("auth")
+class EnvironmentAuthHttpApi extends HttpApiGroup.make("auth")
   .add(
     HttpApiEndpoint.get("session", "/api/auth/session", {
       headers: OptionalBearerHeaders,
@@ -422,12 +490,43 @@ export class EnvironmentAuthHttpApi extends HttpApiGroup.make("auth")
     }).middleware(EnvironmentAuthenticatedAuth),
   ) {}
 
+const EnvironmentOrchestrationThreadSnapshotParams = Schema.Struct({
+  threadId: ThreadId,
+});
+
+// Query-string window for windowed thread snapshots (GET payloads must encode
+// to strings). Both fields optional: omitting them keeps the full-snapshot
+// behavior, so pagination stays opt-in per request.
+const EnvironmentOrchestrationThreadSnapshotQuery = {
+  reasoningMessages: Schema.optional(Schema.Literal("true")),
+  turnLimit: Schema.optional(
+    Schema.FiniteFromString.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1)),
+  ),
+  beforeCursor: Schema.optional(TrimmedNonEmptyString),
+};
+
 export class EnvironmentOrchestrationHttpApi extends HttpApiGroup.make("orchestration")
   .add(
     HttpApiEndpoint.get("snapshot", "/api/orchestration/snapshot", {
       headers: OptionalBearerHeaders,
       success: OrchestrationReadModel,
       error: EnvironmentOrchestrationSnapshotErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("shellSnapshot", "/api/orchestration/shell", {
+      headers: OptionalBearerHeaders,
+      success: OrchestrationShellSnapshot,
+      error: EnvironmentOrchestrationSnapshotErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("threadSnapshot", "/api/orchestration/threads/:threadId", {
+      headers: OptionalBearerHeaders,
+      params: EnvironmentOrchestrationThreadSnapshotParams,
+      payload: EnvironmentOrchestrationThreadSnapshotQuery,
+      success: OrchestrationThreadDetailSnapshot,
+      error: EnvironmentOrchestrationThreadSnapshotErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
   )
   .add(
@@ -439,7 +538,23 @@ export class EnvironmentOrchestrationHttpApi extends HttpApiGroup.make("orchestr
     }).middleware(EnvironmentAuthenticatedAuth),
   ) {}
 
-export class EnvironmentConnectHttpApi extends HttpApiGroup.make("connect")
+/** Large, compressible pull-request payloads travel over HTTP rather than the RPC socket. */
+class EnvironmentPullRequestsHttpApi extends HttpApiGroup.make("pullRequests").add(
+  HttpApiEndpoint.post("diff", "/api/pull-requests/diff", {
+    headers: OptionalBearerHeaders,
+    payload: PullRequestDiffInput,
+    success: PullRequestDiffResult,
+    error: [
+      PullRequestUnavailableError,
+      PullRequestOperationError,
+      EnvironmentAuthInvalidError,
+      EnvironmentScopeRequiredError,
+      EnvironmentInternalError,
+    ],
+  }).middleware(EnvironmentAuthenticatedAuth),
+) {}
+
+class EnvironmentConnectHttpApi extends HttpApiGroup.make("connect")
   .add(
     HttpApiEndpoint.post("linkProof", "/api/connect/link-proof", {
       headers: OptionalBearerHeaders,
@@ -504,4 +619,5 @@ export class EnvironmentHttpApi extends HttpApi.make("environment")
   .add(EnvironmentMetadataHttpApi)
   .add(EnvironmentAuthHttpApi)
   .add(EnvironmentOrchestrationHttpApi)
+  .add(EnvironmentPullRequestsHttpApi)
   .add(EnvironmentConnectHttpApi) {}

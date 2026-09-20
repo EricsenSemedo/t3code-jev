@@ -8,6 +8,10 @@ import { cryptoLayer } from "../features/cloud/dpop";
 import { managedRelayClientLayer } from "../features/cloud/managedRelayLayer";
 import { resolveCloudPublicConfig } from "../features/cloud/publicConfig";
 import { tracingLayer } from "../features/observability/tracing";
+import * as Persistence from "../persistence/layer";
+import { disposeOnFoundationReplace, type FoundationHotModule } from "./foundation-fast-refresh";
+
+declare const module: { readonly hot?: FoundationHotModule } | undefined;
 
 function configuredRelayUrl(): string {
   return resolveCloudPublicConfig().relay.url ?? "http://relay.invalid";
@@ -20,6 +24,7 @@ type RuntimeLayerSource =
   | typeof Socket.layerWebSocketConstructorGlobal
   | typeof cryptoLayer
   | typeof httpClientLayer
+  | typeof Persistence.layer
   | typeof tracingLayer;
 
 const runtimeLayer = Layer.merge(
@@ -29,6 +34,7 @@ const runtimeLayer = Layer.merge(
   Layer.provideMerge(cryptoLayer),
   Layer.provideMerge(httpClientLayer),
   Layer.provideMerge(tracingLayer.pipe(Layer.provide(httpClientLayer))),
+  Layer.provideMerge(Persistence.layer),
 );
 
 export const runtime: ManagedRuntime.ManagedRuntime<
@@ -40,3 +46,7 @@ export const runtimeContextLayer: Layer.Layer<
   Layer.Success<RuntimeLayerSource>,
   Layer.Error<RuntimeLayerSource>
 > = Layer.effectContext(runtime.contextEffect);
+
+disposeOnFoundationReplace(typeof module === "undefined" ? undefined : module.hot, () =>
+  runtime.dispose(),
+);

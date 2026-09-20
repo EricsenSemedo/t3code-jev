@@ -1,5 +1,5 @@
 import * as Cloudflare from "@/Cloudflare/index.ts";
-import * as Drizzle from "@/Drizzle/index.ts";
+import * as Drizzle from "@/Drizzle/Postgres.ts";
 import { eq } from "drizzle-orm";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -8,9 +8,9 @@ import { relations, Widgets } from "./schema.ts";
 
 /**
  * Regression guard for the ExecutionContext-in-Workflow fix
- * (https://github.com/alchemy-run/alchemy-effect/pull/515).
+ * (https://github.com/alchemy-run/alchemy/pull/515).
  *
- * `Drizzle.postgres` resolves its pool through `ExecutionContext`, which
+ * `Drizzle.Postgres` resolves its pool through `ExecutionContext`, which
  * `WorkflowBridge.run` now provides per run and `task` threads into each
  * step. Without the fix the query inside a `task` dies on the missing
  * service and the run goes `errored`.
@@ -23,11 +23,11 @@ export default class DrizzleWorkflow extends Cloudflare.Workflow<DrizzleWorkflow
   Effect.gen(function* () {
     // `proxyChain` defers the connect to the first query, so the pool opens
     // inside a step — where `ExecutionContext` is provided — not here at init.
-    const conn = yield* Cloudflare.Hyperdrive.bind(Hyperdrive);
-    const db = yield* Drizzle.postgres(conn.connectionString, { relations });
+    const conn = yield* Cloudflare.Hyperdrive.Connect(Hyperdrive);
+    const db = yield* Drizzle.Postgres(conn.connectionString, { relations });
 
     return Effect.fn(function* (input: { id: number; name: string }) {
-      const inserted = yield* Cloudflare.task(
+      const inserted = yield* Cloudflare.Workflows.task(
         "insert-widget",
         Effect.gen(function* () {
           const [row] = yield* db
@@ -42,9 +42,9 @@ export default class DrizzleWorkflow extends Cloudflare.Workflow<DrizzleWorkflow
         }).pipe(Effect.orDie),
       );
 
-      yield* Cloudflare.sleep("settle", "1 second");
+      yield* Cloudflare.Workflows.sleep("settle", "1 second");
 
-      const rows = yield* Cloudflare.task(
+      const rows = yield* Cloudflare.Workflows.task(
         "select-widget",
         Effect.gen(function* () {
           return yield* db
@@ -57,5 +57,5 @@ export default class DrizzleWorkflow extends Cloudflare.Workflow<DrizzleWorkflow
       // Step results are JSON-serialized by Cloudflare — return plain rows.
       return { inserted, rowCount: rows.length, widget: rows[0] ?? null };
     });
-  }).pipe(Effect.provide(Layer.mergeAll(Cloudflare.HyperdriveBindingLive))),
+  }).pipe(Effect.provide(Layer.mergeAll(Cloudflare.Hyperdrive.ConnectBinding))),
 ) {}

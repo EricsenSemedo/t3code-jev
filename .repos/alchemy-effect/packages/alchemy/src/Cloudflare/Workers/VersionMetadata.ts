@@ -1,81 +1,55 @@
 import type * as Effect from "effect/Effect";
-import { SingleShotGen } from "effect/Utils";
-import {
-  VersionMetadataBinding,
-  type VersionMetadataAccessor,
-} from "./VersionMetadataBinding.ts";
+import type { RuntimeContext } from "../../RuntimeContext.ts";
+import * as Binding from "./Binding.ts";
+import type { VersionMetadataBinding } from "./VersionMetadataBinding.ts";
 
-type VersionMetadataTypeId = typeof VersionMetadataTypeId;
-const VersionMetadataTypeId = "Cloudflare.VersionMetadata" as const;
-
-export type VersionMetadataProps = {
-  /**
-   * Binding name used when `VersionMetadata` is bound from inside a Worker init
-   * phase (`yield* Cloudflare.VersionMetadata(...)`). When passed through
-   * `Worker({ env: { ... } })`, the object key remains the binding name.
-   *
-   * @default "CF_VERSION_METADATA"
-   */
-  name?: string;
-};
+const TypeId = "Cloudflare.Workers.VersionMetadata" as const;
+type TypeId = typeof TypeId;
 
 /**
- * The Effect yielded when a `VersionMetadata` marker is used inside a Worker
- * init phase: it attaches the `version_metadata` binding to the surrounding
- * Worker and resolves to a deferred {@link VersionMetadataAccessor}.
+ * Runtime value Cloudflare exposes for a `version_metadata` binding — the
+ * deployed Worker version's `id`, `tag`, and `timestamp`.
  */
-type BindEffect = Effect.Effect<
-  VersionMetadataAccessor,
+export interface WorkerVersionMetadata {
+  readonly id: string;
+  readonly tag: string;
+  readonly timestamp: string;
+}
+
+/**
+ * Effect-native accessor for the version metadata. The env binding only exists
+ * at the *exec* phase on the deployed Worker, so reading it is deferred behind
+ * an Effect that requires {@link RuntimeContext}. Yield it inside a handler to
+ * obtain the {@link WorkerVersionMetadata}.
+ */
+export type VersionMetadataAccessor = Effect.Effect<
+  WorkerVersionMetadata,
   never,
-  VersionMetadataBinding
+  RuntimeContext
 >;
 
 /**
- * Marker for a Cloudflare Workers Version Metadata binding.
+ * A Cloudflare Workers Version Metadata binding — a Worker-only binding with no
+ * backing cloud resource. Cloudflare provides the deployed Worker version at
+ * runtime (`id`, `tag`, `timestamp`).
  *
- * It is a plain data structure (so it can be declared directly on a Worker's
- * `env`) that is **also** yieldable inside an Effect-native Worker. Yielding it
- * (`yield* Cloudflare.VersionMetadata(...)`) attaches the binding to the
- * surrounding Worker and returns a deferred accessor for the runtime
- * {@link import("./VersionMetadataBinding.ts").WorkerVersionMetadata}.
+ * `VersionMetadata` is a single value that is at once the `Binding.Service` tag,
+ * the callable that produces a {@link VersionMetadataBinding}, and the type.
+ * Declare it on a Worker's `env` (it flows through `InferEnv` →
+ * {@link WorkerVersionMetadata}) or `yield*` it inside an Effect-native Worker
+ * to attach the binding and obtain a deferred {@link VersionMetadataAccessor}.
  *
- * The divergence is achieved via `[Symbol.iterator]`: the object is
- * deliberately not an `Effect` (so `InferEnv` and the Worker `env` resolver
- * keep it as the native version metadata rather than `yield*`-ing it), but it
- * is iterable as one when `yield*`-ed.
- */
-export type VersionMetadata = {
-  kind: VersionMetadataTypeId;
-  name: string;
-  asEffect(): BindEffect;
-  [Symbol.iterator](): SingleShotGen<BindEffect, VersionMetadataAccessor>;
-};
-
-export const isVersionMetadata = (value: unknown): value is VersionMetadata =>
-  typeof value === "object" &&
-  value !== null &&
-  "kind" in value &&
-  (value as VersionMetadata).kind === VersionMetadataTypeId;
-
-/**
- * A Cloudflare Workers Version Metadata binding.
- *
- * Cloudflare provides the deployed Worker version at runtime (`id`, `tag`,
- * `timestamp`).
- *
- * @binding
- *
- * @section Effect-style Worker (recommended)
- * @example Read the deployed version from inside a handler
+ * ### Effect-style Worker (recommended)
+ * **Example:** Read the deployed version from inside a handler
  * ```typescript
  * import * as Effect from "effect/Effect";
  *
  * Cloudflare.Worker(
  *   "VersionWorker",
- *   { main: import.meta.filename },
+ *   { main: import.meta.url },
  *   Effect.gen(function* () {
  *     // Attaches the binding to this Worker AND returns a deferred accessor.
- *     const versionMetadata = yield* Cloudflare.VersionMetadata();
+ *     const versionMetadata = yield* Cloudflare.Workers.VersionMetadata();
  *
  *     return {
  *       fetch: Effect.gen(function* () {
@@ -83,18 +57,16 @@ export const isVersionMetadata = (value: unknown): value is VersionMetadata =>
  *         return Response.json({ id, tag, timestamp });
  *       }),
  *     };
- *   }).pipe(Effect.provide(Cloudflare.VersionMetadataBindingLive)),
+ *   }).pipe(Effect.provide(Cloudflare.Workers.VersionMetadataBinding)),
  * );
  * ```
  *
- * @section Worker binding metadata
- * @example
+ * ### Worker binding metadata
+ * **Example:** Example
  * ```typescript
  * export const Worker = Cloudflare.Worker("Worker", {
  *   main: "./src/worker.ts",
- *   env: {
- *     CF_VERSION_METADATA: Cloudflare.VersionMetadata(),
- *   },
+ *   env: { CF_VERSION_METADATA: Cloudflare.Workers.VersionMetadata() },
  * });
  *
  * export type WorkerEnv = Cloudflare.InferEnv<typeof Worker>;
@@ -102,28 +74,33 @@ export const isVersionMetadata = (value: unknown): value is VersionMetadata =>
  * ```
  *
  * @see https://developers.cloudflare.com/workers/runtime-apis/bindings/version-metadata/
+ *
+ * @binding
+ * @product Workers
+ * @category Workers & Compute
  */
-export const VersionMetadata: {
-  (props?: VersionMetadataProps): VersionMetadata;
+export interface VersionMetadata extends Binding.Service<
+  VersionMetadata,
+  TypeId,
+  VersionMetadataAccessor
+> {
   /**
-   * Bind an existing `VersionMetadata` marker to the surrounding Worker,
-   * returning the deferred accessor. Equivalent to `yield* versionMetadata` —
-   * prefer yielding the marker directly.
+   * @param name Binding name (logical id) — the `env` key it resolves to.
+   * @default "CF_VERSION_METADATA"
    */
-  bind: typeof VersionMetadataBinding.bind;
-} = Object.assign(
-  (props?: VersionMetadataProps): VersionMetadata => {
-    const self: VersionMetadata = {
-      kind: VersionMetadataTypeId,
-      name: props?.name ?? "CF_VERSION_METADATA",
-      asEffect: () => VersionMetadataBinding.bind(self),
-      [Symbol.iterator]: () =>
-        new SingleShotGen(VersionMetadataBinding.bind(self)),
-    };
-    return self;
-  },
-  {
-    bind: (...args: Parameters<typeof VersionMetadataBinding.bind>) =>
-      VersionMetadataBinding.bind(...args),
-  },
-);
+  (name?: string): VersionMetadataBinding;
+}
+
+export const VersionMetadata = Binding.Service<VersionMetadata>({
+  id: TypeId,
+  defaultName: "CF_VERSION_METADATA",
+  toWorkerBinding: (binding) => ({
+    type: "version_metadata",
+    name: binding.name,
+  }),
+});
+
+export const isVersionMetadata = (
+  value: unknown,
+): value is VersionMetadataBinding =>
+  Binding.isBinding(value) && value.kind === TypeId;

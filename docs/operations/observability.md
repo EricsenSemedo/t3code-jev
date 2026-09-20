@@ -1,39 +1,66 @@
 # Observability
 
+> For maintainers. Using T3 Code? See [docs/user](../user/).
+
 T3 Code has one server-side observability model:
 
 - pretty logs go to stdout for humans
 - completed spans go to a local NDJSON trace file
-- traces and metrics can also be exported over OTLP to a real backend like Grafana LGTM
+- traces, metrics, and logs can also be exported over OTLP to a real backend like Grafana LGTM
 
-The local trace file is the persisted source of truth. There is no separate persisted server log file anymore.
+The local trace file is the persisted source of truth for normal local launches. Those launches do not
+write a separate server log file, but SSH-managed launches also persist the remote process's
+stdout/stderr at `~/.t3/ssh-launch/<state>/server.log`.
 
 ## Where To Find Things
 
 ### Logs
 
-Logs are human-facing only:
+Logs are human-facing:
 
 - destination: stdout
 - format: `Logger.consolePretty()`
-- persistence: none
+- normal local persistence: none
+- SSH-managed launch persistence: `~/.t3/ssh-launch/<state>/server.log`
+- remote export: OTLP only, when configured
 
 If you want a log message to show up in the trace file, emit it inside an active span with `Effect.log...`. `Logger.tracerLogger` will attach it as a span event.
 
+Configuring a logs endpoint takes over that job. The server then exports log records, which cover
+every message instead of only the ones inside an active span and carry the trace and span ids so
+they still line up with the trace. `Logger.tracerLogger` is dropped in that mode, so the same
+message is not exported twice and the trace file stops carrying log messages. stdout output and
+SSH-managed launch persistence stay unchanged either way.
+
 ### Traces
 
-Completed spans are written as NDJSON records to `serverTracePath` (by default, `~/.t3/userdata/logs/server.trace.ndjson`).
+Completed spans are written as NDJSON records to `serverTracePath`. The default depends on how the
+server starts: production and explicitly configured homes use
+`<home>/userdata/logs/server.trace.ndjson` (so `~/.t3/userdata/...` by default, or
+`/custom/path/userdata/...` with `--home-dir /custom/path`), a linked worktree dev run uses
+`<worktree>/.t3/userdata/logs/server.trace.ndjson`, and an implicit dev run outside a linked
+worktree uses `~/.t3/dev/logs/server.trace.ndjson`.
 
-Important fields in each record:
+Important fields common to both record types:
 
+- `type`: `effect-span` or `otlp-span`
 - `name`: span name
 - `traceId`, `spanId`, `parentSpanId`: correlation
 - `durationMs`: elapsed time
 - `attributes`: structured context
 - `events`: embedded logs and custom events
-- `exit`: `Success`, `Failure`, or `Interrupted`
 
-The schema lives in `apps/server/src/observability/TraceRecord.ts`.
+`effect-span` records also contain `exit` with `Success`, `Failure`, or `Interrupted`. `otlp-span`
+records instead carry OTLP resource, scope, and optional status fields.
+
+The `TraceRecord`, `EffectTraceRecord`, and `OtlpTraceRecord` schemas live in
+`packages/shared/src/observability.ts`.
+
+DPoP proof failures include the safe `environment.dpop.failure_code` span
+attribute. A `time_window` failure means that a signed proof was too old or too
+far in the future for the environment server's allowed window. It can point to
+a date or time problem on either device, but it can also result from a delayed
+request.
 
 ### Metrics
 
@@ -101,6 +128,7 @@ Default Grafana login:
 ```bash
 export T3CODE_OTLP_TRACES_URL=http://localhost:4318/v1/traces
 export T3CODE_OTLP_METRICS_URL=http://localhost:4318/v1/metrics
+export T3CODE_OTLP_LOGS_URL=http://localhost:4318/v1/logs
 export T3CODE_OTLP_SERVICE_NAME=t3-local
 ```
 
@@ -140,6 +168,7 @@ macOS app bundle example:
 ```bash
 T3CODE_OTLP_TRACES_URL=http://localhost:4318/v1/traces \
 T3CODE_OTLP_METRICS_URL=http://localhost:4318/v1/metrics \
+T3CODE_OTLP_LOGS_URL=http://localhost:4318/v1/logs \
 T3CODE_OTLP_SERVICE_NAME=t3-desktop \
 "/Applications/T3 Code.app/Contents/MacOS/T3 Code"
 ```
@@ -149,6 +178,7 @@ Direct binary example:
 ```bash
 T3CODE_OTLP_TRACES_URL=http://localhost:4318/v1/traces \
 T3CODE_OTLP_METRICS_URL=http://localhost:4318/v1/metrics \
+T3CODE_OTLP_LOGS_URL=http://localhost:4318/v1/logs \
 T3CODE_OTLP_SERVICE_NAME=t3-desktop \
 ./path/to/your/desktop-app-binary
 ```
@@ -165,27 +195,40 @@ The backend reads observability config at process start. If you change OTLP env 
 
 The trace file is the fastest way to inspect raw span data.
 
-Tail it:
+Resolve the path for the launch mode once. Production and explicitly configured homes store runtime
+state under the base directory's `userdata` folder:
 
 ```bash
-tail -f "$T3CODE_HOME/userdata/logs/server.trace.ndjson"
+TRACE_FILE="${T3CODE_HOME:-$HOME/.t3}/userdata/logs/server.trace.ndjson"
 ```
 
-In monorepo dev, use:
+A dev server started from a linked worktree defaults to that worktree's local home:
 
 ```bash
-tail -f ./dev/logs/server.trace.ndjson
+TRACE_FILE="$WORKTREE/.t3/userdata/logs/server.trace.ndjson"
+```
+
+Only an implicit dev run outside a linked worktree uses the shared dev directory:
+
+```bash
+TRACE_FILE="$HOME/.t3/dev/logs/server.trace.ndjson"
+```
+
+Tail the selected file:
+
+```bash
+tail -f "$TRACE_FILE"
 ```
 
 Show failed spans:
 
 ```bash
-jq -c 'select(.exit._tag != "Success") | {
+jq -c 'select(.type == "effect-span" and .exit._tag != "Success") | {
   name,
   durationMs,
   exit,
   attributes
-}' "$T3CODE_HOME/userdata/logs/server.trace.ndjson"
+}' "$TRACE_FILE"
 ```
 
 Show slow spans:
@@ -196,7 +239,7 @@ jq -c 'select(.durationMs > 1000) | {
   durationMs,
   traceId,
   spanId
-}' "$T3CODE_HOME/userdata/logs/server.trace.ndjson"
+}' "$TRACE_FILE"
 ```
 
 Inspect embedded log events:
@@ -213,7 +256,7 @@ jq -c 'select(any(.events[]?; .attributes["effect.logLevel"] != null)) | {
         level: .attributes["effect.logLevel"]
       }
   ]
-}' "$T3CODE_HOME/userdata/logs/server.trace.ndjson"
+}' "$TRACE_FILE"
 ```
 
 Follow one trace:
@@ -224,7 +267,7 @@ jq -r 'select(.traceId == "TRACE_ID_HERE") | [
   .spanId,
   (.parentSpanId // "-"),
   .durationMs
-] | @tsv' "$T3CODE_HOME/userdata/logs/server.trace.ndjson"
+] | @tsv' "$TRACE_FILE"
 ```
 
 Filter orchestration commands:
@@ -235,7 +278,7 @@ jq -c 'select(.attributes["orchestration.command_type"] != null) | {
   durationMs,
   commandType: .attributes["orchestration.command_type"],
   aggregateKind: .attributes["orchestration.aggregate_kind"]
-}' "$T3CODE_HOME/userdata/logs/server.trace.ndjson"
+}' "$TRACE_FILE"
 ```
 
 Filter git activity:
@@ -250,7 +293,7 @@ jq -c 'select(.attributes["git.operation"] != null) | {
     .events[]
     | select(.name == "git.hook.started" or .name == "git.hook.finished")
   ]
-}' "$T3CODE_HOME/userdata/logs/server.trace.ndjson"
+}' "$TRACE_FILE"
 ```
 
 ### Use Tempo When You Need A Real Trace Viewer
@@ -273,10 +316,12 @@ Recommended flow in Grafana:
 Good first searches:
 
 - service name such as `t3-local`, `t3-dev`, or `t3-desktop`
-- span names like `sql.execute`, `git.runCommand`, `provider.sendTurn`
+- span names like `sendTurn` or a Git operation such as `GitVcsDriver.statusDetails.status`
+- Git spans whose `git.operation` attribute identifies the operation
 - orchestration spans with attributes like `orchestration.command_type`
 
-Once you know traces are arriving, narrower TraceQL queries like `name = "sql.execute"` become useful.
+Once you know traces are arriving, narrower TraceQL queries for names such as `sendTurn` or Git
+operation names become useful.
 
 ### Use Metrics To See Systemic Problems
 
@@ -289,7 +334,6 @@ Good metric families to watch:
 - `t3_orchestration_command_ack_duration`
 - `t3_provider_turn_duration`
 - `t3_git_command_duration`
-- `t3_db_query_duration`
 
 Counters tell you volume and failure rate:
 
@@ -297,7 +341,6 @@ Counters tell you volume and failure rate:
 - `t3_orchestration_commands_total`
 - `t3_provider_turns_total`
 - `t3_git_commands_total`
-- `t3_db_queries_total`
 
 Use metrics when the question is:
 
@@ -331,7 +374,7 @@ If you need those later, add client-side instrumentation or a dedicated server f
 ### "Why did this request fail?"
 
 1. Start with the local NDJSON file.
-2. Find spans where `exit._tag != "Success"`.
+2. Find `effect-span` records where `exit._tag != "Success"`.
 3. Group by `traceId`.
 4. Inspect sibling spans and span events.
 5. If needed, move to Tempo for the full trace tree.
@@ -476,7 +519,16 @@ It provides:
 - local NDJSON tracer
 - optional OTLP trace exporter
 - optional OTLP metrics exporter
+- optional OTLP log exporter
 - Effect trace-level and timing refs
+
+The desktop main process is a second producer, assembled in
+`apps/desktop/src/app/DesktopObservability.ts`. It reads the same `T3CODE_OTLP_*` names and the same
+Settings entries as the backend it supervises, and covers work the backend cannot see: app startup,
+window and menu handling, backend supervision, and updates. It reports as service `desktop`
+regardless of `T3CODE_OTLP_SERVICE_NAME`, so a collector shows it alongside the backend rather than
+mixed into it. It exports traces and logs only; the main process records no metrics, so the metrics
+endpoint applies to the backend alone.
 
 ### Env Vars
 
@@ -493,10 +545,15 @@ OTLP export:
 
 - `T3CODE_OTLP_TRACES_URL`: OTLP trace endpoint
 - `T3CODE_OTLP_METRICS_URL`: OTLP metric endpoint
+- `T3CODE_OTLP_LOGS_URL`: OTLP log endpoint
 - `T3CODE_OTLP_EXPORT_INTERVAL_MS`: export interval, default `10000`
 - `T3CODE_OTLP_SERVICE_NAME`: service name, default `t3-server`
+- `T3CODE_OTLP_HEADERS`: extra headers for all three exporters, same format as
+  `OTEL_EXPORTER_OTLP_HEADERS`: comma-separated `key=value` pairs with percent-encoded values.
+- `T3CODE_OTLP_PROTOCOL`: `http/json` (default) or `http/protobuf`
 
-If the OTLP URLs are unset, local tracing still works and metrics stay in-process only.
+If the OTLP URLs are unset, local tracing still works, metrics stay in-process only, and logs stay
+on stdout only.
 
 ### What Is Instrumented Today
 
@@ -514,6 +571,8 @@ Current high-value span and metric boundaries include:
 
 ### Current Constraints
 
-- logs outside spans are not persisted
+- logs outside spans are not persisted in the trace file; SSH-managed launch stdout/stderr is still
+  captured in its launcher log
 - metrics are not snapshotted locally
-- the old `serverLogPath` still exists in config for compatibility, but the trace file is the persisted artifact that matters
+- the old `serverLogPath` still exists in config for compatibility, but the trace file is the primary
+  structured persisted artifact

@@ -42,6 +42,7 @@ import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 import { FetchHttpClient } from "effect/unstable/http";
 
+import { APP_VERSION } from "../branding";
 import { readDesktopPrimaryBearerToken } from "../environments/primary/desktopAuth";
 import { primaryEnvironmentHttpLayer } from "../environments/primary/httpLayer";
 import {
@@ -50,6 +51,7 @@ import {
 } from "../environments/primary/target";
 import { clearComposerDraftsEnvironment } from "../composerDraftStore";
 import { isHostedStaticApp } from "../hostedPairing";
+import { isLocalEnvironmentDisabled } from "../localEnvironment";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { acknowledgeRpcRequest, trackRpcRequestSent } from "../rpc/requestLatencyState";
 import {
@@ -58,6 +60,7 @@ import {
   type DesktopSecondaryBootstrapsRead,
 } from "./desktopLocal";
 import { connectionStorageLayer } from "./storage";
+import { clientPresentationMetadata } from "./clientMetadata";
 
 let nextObservedRpcRequestId = 0;
 
@@ -114,13 +117,16 @@ const wakeupsLayer = Wakeups.layer({
 });
 
 function clientMetadata() {
-  const desktop = window.desktopBridge !== undefined;
-  const platform = navigator.platform.trim();
-  return {
-    label: desktop ? "T3 Code Desktop" : "T3 Code Web",
-    deviceType: "desktop" as const,
-    ...(platform === "" ? {} : { os: platform }),
-  };
+  return clientPresentationMetadata({
+    appVersion: APP_VERSION,
+    hosted: isHostedStaticApp(),
+    identity: {
+      userAgent: navigator.userAgent,
+      platform: navigator.platform,
+      maxTouchPoints: navigator.maxTouchPoints,
+    },
+    desktopBridge: window.desktopBridge,
+  });
 }
 
 function sshPreparationError(cause: unknown) {
@@ -177,12 +183,15 @@ const capabilitiesLayer = Layer.effectContext(
       scopes: AuthStandardClientScopes,
     });
     const cloudSession = CloudSession.of({
+      identity: Effect.sync(() =>
+        Option.fromNullishOr(appAtomRegistry.get(managedRelaySessionAtom)),
+      ),
       clerkToken: Effect.gen(function* () {
         const session = appAtomRegistry.get(managedRelaySessionAtom);
         if (session === null) {
           return yield* new ConnectionBlockedError({
             reason: "authentication",
-            detail: "Sign in to T3 Cloud to connect this environment.",
+            detail: "Sign in to T3 Connect to connect this environment.",
           });
         }
         const token = yield* session.readClerkToken().pipe(
@@ -197,7 +206,7 @@ const capabilitiesLayer = Layer.effectContext(
         if (token === null) {
           return yield* new ConnectionBlockedError({
             reason: "authentication",
-            detail: "The T3 Cloud session is unavailable.",
+            detail: "The T3 Connect session is unavailable.",
           });
         }
         return token;
@@ -456,7 +465,7 @@ export function secondaryRegistrationsToRetainAfterTopologyRead(
 const platformConnectionSourceLayer = Layer.effect(
   PlatformConnectionSource,
   Effect.gen(function* () {
-    if (isHostedStaticApp()) {
+    if (isHostedStaticApp() || isLocalEnvironmentDisabled()) {
       return PlatformConnectionSource.of({
         registrations: Stream.empty,
       });
@@ -590,7 +599,7 @@ const rpcRequestObserverLayer = Layer.succeed(
       Effect.sync(() => {
         nextObservedRpcRequestId += 1;
         const requestId = `${environmentId}:${nextObservedRpcRequestId}`;
-        trackRpcRequestSent(requestId, `${method} · ${environmentId}`);
+        trackRpcRequestSent(requestId, method, `${method} · ${environmentId}`);
         return Effect.sync(() => {
           acknowledgeRpcRequest(requestId);
         });

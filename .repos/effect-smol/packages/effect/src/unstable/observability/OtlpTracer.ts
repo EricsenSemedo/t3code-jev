@@ -1,41 +1,31 @@
 /**
- * Exports Effect spans to an OpenTelemetry Protocol (OTLP) traces endpoint.
+ * Exports Effect tracing spans over OTLP/HTTP.
  *
- * This module creates a `Tracer.Tracer` backed by the shared OTLP/HTTP batch
- * exporter, so Effect spans created with tracing APIs can be delivered to an
- * OpenTelemetry Collector, vendor OTLP intake, or local development collector.
- * Use `make` when you need to install the tracer manually, or `layer` when an
- * application should provide it through the Effect environment.
- *
- * Pass a concrete traces endpoint, typically `/v1/traces`, or use the
- * higher-level `Otlp` module when you want `baseUrl` path construction for all
- * observability signals. The tracer exports only ended sampled spans, converts
- * span attributes, events, links, status, parent identifiers, and failure
- * causes into OTLP trace data, and groups every batch under the configured
- * resource. Resource options are resolved through `OtlpResource`, so ensure a
- * stable `service.name` is available through options or standard OTEL resource
- * environment variables because it is also used as the instrumentation scope
- * name. Tune `exportInterval`, `maxBatchSize`, and `shutdownTimeout` for the
- * target backend and process shutdown behavior, provide `headers` for
- * authentication or routing, choose an `OtlpSerialization` layer accepted by
- * the endpoint, and use `context` only when a backend needs custom evaluation
- * around the active span.
+ * This module creates a `Tracer.Tracer` backed by the shared OTLP batch
+ * exporter, so spans created by Effect tracing APIs can be sent to an
+ * OpenTelemetry Collector, vendor endpoint, or local collector. Exported spans
+ * include identifiers, parent links, attributes, events, timing, kind, and
+ * status information. Use the constructor directly or install it through the
+ * provided layer.
  *
  * @since 4.0.0
  */
 import * as Cause from "../../Cause.ts"
+import * as Config from "../../Config.ts"
 import type * as Context from "../../Context.ts"
 import * as Duration from "../../Duration.ts"
 import * as Effect from "../../Effect.ts"
+import * as Encoding from "../../Encoding.ts"
 import type * as Exit from "../../Exit.ts"
 import { flow } from "../../Function.ts"
 import * as Layer from "../../Layer.ts"
 import * as Option from "../../Option.ts"
 import type * as Scope from "../../Scope.ts"
 import * as Tracer from "../../Tracer.ts"
-import type { ExtractTag, Mutable } from "../../Types.ts"
+import type { ExtractTag } from "../../Types.ts"
 import type * as Headers from "../http/Headers.ts"
 import type * as HttpClient from "../http/HttpClient.ts"
+import * as OtlpEnv from "./internal/otlpEnv.ts"
 import * as Exporter from "./OtlpExporter.ts"
 import type { KeyValue, Resource } from "./OtlpResource.ts"
 import { entriesToAttributes } from "./OtlpResource.ts"
@@ -70,7 +60,7 @@ export const make: (
 ) => Effect.Effect<
   Tracer.Tracer,
   never,
-  OtlpSerialization | HttpClient.HttpClient | Scope.Scope
+  Exporter.Flusher | OtlpSerialization | HttpClient.HttpClient | Scope.Scope
 > = Effect.fnUntraced(function*(options) {
   const otelResource = yield* OtlpResource.fromConfig(options.resource)
   const serialization = yield* OtlpSerialization
@@ -94,7 +84,7 @@ export const make: (
           }]
         }]
       }
-      return serialization.traces(data)
+      return [serialization.traces(data), Effect.void]
     },
     shutdownTimeout: options.shutdownTimeout ?? Duration.seconds(3)
   })
@@ -106,22 +96,14 @@ export const make: (
 
   return Tracer.make({
     span(options) {
-      return makeSpan({
-        ...options,
-        status: {
-          _tag: "Started",
-          startTime: options.startTime
-        },
-        attributes: new Map(),
-        export: exportFn
-      })
+      return new SpanImpl(options, exportFn)
     },
     context: options.context ?
       function(primitive, fiber) {
-        if (fiber.currentSpan === undefined) {
+        if (fiber.cache.span === undefined) {
           return primitive["~effect/Effect/evaluate"](fiber)
         }
-        return options.context!(primitive, fiber.currentSpan)
+        return options.context!(primitive, fiber.cache.span)
       } :
       undefined
   })
@@ -145,21 +127,125 @@ export const layer: (options: {
   readonly maxBatchSize?: number | undefined
   readonly context?: (<X>(primitive: Tracer.EffectPrimitive<X>, span: Tracer.AnySpan) => X) | undefined
   readonly shutdownTimeout?: Duration.Input | undefined
-}) => Layer.Layer<never, never, OtlpSerialization | HttpClient.HttpClient> = flow(make, Layer.effect(Tracer.Tracer))
+}) => Layer.Layer<Exporter.Flusher, never, OtlpSerialization | HttpClient.HttpClient> = flow(
+  make,
+  Layer.effect(Tracer.Tracer),
+  Layer.provideMerge(Exporter.layerFlusher)
+)
+
+/**
+ * Creates an OTLP traces layer from OpenTelemetry configuration.
+ *
+ * @category layers
+ * @since 4.0.0
+ */
+export const layerFromConfig = (options?: {
+  readonly resource?: {
+    readonly serviceName?: string | undefined
+    readonly serviceVersion?: string | undefined
+    readonly attributes?: Record<string, unknown>
+  } | undefined
+  readonly headers?: Headers.Input | undefined
+  readonly context?: (<X>(primitive: Tracer.EffectPrimitive<X>, span: Tracer.AnySpan) => X) | undefined
+}): Layer.Layer<Exporter.Flusher, never, HttpClient.HttpClient | OtlpSerialization> =>
+  Effect.gen(function*() {
+    const { disabled, endpoint, exporters } = yield* Config.all({
+      disabled: Config.Boolean("OTEL_SDK_DISABLED").pipe(Config.withDefault(false)),
+      endpoint: OtlpEnv.endpoint("TRACES"),
+      exporters: OtlpEnv.exporters("TRACES")
+    })
+
+    if (disabled || !endpoint || !exporters.includes("otlp")) {
+      return Exporter.layerFlusher
+    }
+
+    const { baseTimeout, tracesTimeout, exportTimeout, scheduleDelay, maxBatchSize } = yield* Config.all({
+      baseTimeout: Config.option(Config.Int("OTEL_EXPORTER_OTLP_TIMEOUT")),
+      tracesTimeout: Config.option(Config.Int("OTEL_EXPORTER_OTLP_TRACES_TIMEOUT")),
+      exportTimeout: Config.option(Config.Int("OTEL_BSP_EXPORT_TIMEOUT")),
+      scheduleDelay: Config.option(
+        Config.Int("OTEL_BSP_SCHEDULE_DELAY").pipe(
+          Config.map(Duration.millis)
+        )
+      ),
+      maxBatchSize: Config.option(Config.Int("OTEL_BSP_MAX_EXPORT_BATCH_SIZE"))
+    })
+
+    const shutdownTimeout = Option.firstSomeOf([tracesTimeout, baseTimeout, exportTimeout]).pipe(
+      Option.map((_) => Duration.millis(_))
+    )
+
+    return layer({
+      url: endpoint.toString(),
+      resource: options?.resource,
+      headers: options?.headers ?? (yield* OtlpEnv.headers("TRACES")),
+      exportInterval: Option.getOrUndefined(scheduleDelay),
+      maxBatchSize: Option.getOrUndefined(maxBatchSize),
+      context: options?.context,
+      shutdownTimeout: Option.getOrUndefined(shutdownTimeout)
+    })
+  }).pipe(Effect.orDie, Layer.unwrap)
 
 // internal
 
-interface SpanImpl extends Tracer.Span {
-  readonly export: (span: SpanImpl) => void
-  readonly attributes: Map<string, unknown>
+class SpanImpl implements Tracer.Span {
+  readonly _tag = "Span"
+  readonly name: string
+  readonly parent: Option.Option<Tracer.AnySpan>
+  readonly annotations: Context.Context<never>
   readonly links: Array<Tracer.SpanLink>
-  readonly events: Array<[name: string, startTime: bigint, attributes: Record<string, unknown> | undefined]>
+  readonly kind: Tracer.SpanKind
+  readonly sampled: boolean
+  readonly export: (span: SpanImpl) => void
   status: Tracer.SpanStatus
-}
+  _traceId: string | undefined = undefined
+  _spanId: string | undefined = undefined
+  _attributes: Map<string, unknown> | undefined = undefined
+  _events: Array<[name: string, startTime: bigint, attributes: Record<string, unknown> | undefined]> | undefined =
+    undefined
 
-const SpanProto = {
-  _tag: "Span",
-  end(this: SpanImpl, endTime: bigint, exit: Exit.Exit<unknown, unknown>) {
+  constructor(
+    options: {
+      readonly name: string
+      readonly parent: Option.Option<Tracer.AnySpan>
+      readonly annotations: Context.Context<never>
+      readonly links: Array<Tracer.SpanLink>
+      readonly startTime: bigint
+      readonly kind: Tracer.SpanKind
+      readonly sampled: boolean
+    },
+    exportFn: (span: SpanImpl) => void
+  ) {
+    this.name = options.name
+    this.parent = options.parent
+    this.annotations = options.annotations
+    this.links = options.links
+    this.kind = options.kind
+    this.sampled = options.sampled
+    this.export = exportFn
+    this.status = {
+      _tag: "Started",
+      startTime: options.startTime
+    }
+  }
+
+  get traceId(): string {
+    return this._traceId ??= Option.isSome(this.parent) ? this.parent.value.traceId : Encoding.randomHex(32)
+  }
+
+  get spanId(): string {
+    return this._spanId ??= Encoding.randomHex(16)
+  }
+
+  get attributes(): Map<string, unknown> {
+    return this._attributes ??= new Map()
+  }
+
+  get events(): Array<[name: string, startTime: bigint, attributes: Record<string, unknown> | undefined]> {
+    return this._events ??= []
+  }
+
+  end(endTime: bigint, exit: Exit.Exit<unknown, unknown>): void {
     this.status = {
       _tag: "Ended",
       startTime: this.status.startTime,
@@ -167,68 +253,43 @@ const SpanProto = {
       exit
     }
     this.export(this)
-  },
-  attribute(this: SpanImpl, key: string, value: unknown) {
+  }
+
+  attribute(key: string, value: unknown): void {
     this.attributes.set(key, value)
-  },
-  event(this: SpanImpl, name: string, startTime: bigint, attributes?: Record<string, unknown>) {
+  }
+
+  event(name: string, startTime: bigint, attributes?: Record<string, unknown>): void {
     this.events.push([name, startTime, attributes])
-  },
-  addLinks(this: SpanImpl, links: ReadonlyArray<Tracer.SpanLink>) {
+  }
+
+  addLinks(links: ReadonlyArray<Tracer.SpanLink>): void {
+    // oxlint-disable-next-line no-restricted-syntax
     this.links.push(...links)
   }
-}
-type RemainingSpanImpl = Omit<Tracer.Span, (keyof typeof SpanProto) | "traceId" | "spanId" | "events">
-
-const makeSpan = (options: {
-  readonly name: string
-  readonly parent: Option.Option<Tracer.AnySpan>
-  readonly annotations: Context.Context<never>
-  readonly status: Tracer.SpanStatus
-  readonly attributes: ReadonlyMap<string, unknown>
-  readonly links: ReadonlyArray<Tracer.SpanLink>
-  readonly kind: Tracer.SpanKind
-  readonly sampled: boolean
-  readonly export: (span: SpanImpl) => void
-}): SpanImpl => {
-  const self: Mutable<SpanImpl> = Object.assign(
-    Object.create(SpanProto),
-    options satisfies RemainingSpanImpl
-  )
-  if (Option.isSome(self.parent)) {
-    self.traceId = self.parent.value.traceId
-  } else {
-    self.traceId = generateId(32)
-  }
-  self.spanId = generateId(16)
-  self.events = []
-  return self
-}
-
-const generateId = (len: number): string => {
-  const chars = "0123456789abcdef"
-  let result = ""
-  for (let i = 0; i < len; i++) {
-    result += chars[Math.floor(Math.random() * chars.length)]
-  }
-  return result
 }
 
 const makeOtlpSpan = (self: SpanImpl): OtlpSpan => {
   const status = self.status as ExtractTag<Tracer.SpanStatus, "Ended">
-  const attributes = entriesToAttributes(self.attributes.entries())
-  const events = self.events.map(([name, startTime, attributes]) => ({
-    name,
-    timeUnixNano: String(startTime),
-    attributes: attributes
-      ? entriesToAttributes(Object.entries(attributes))
-      : [],
-    droppedAttributesCount: 0
-  }))
+  const attributes = self._attributes === undefined ? [] : entriesToAttributes(self._attributes)
+  const events: Array<Event> = []
+  if (self._events !== undefined) {
+    for (let i = 0; i < self._events.length; i++) {
+      const [name, startTime, attributes] = self._events[i]
+      events.push({
+        name,
+        timeUnixNano: String(startTime),
+        attributes: attributes
+          ? entriesToAttributes(Object.entries(attributes))
+          : [],
+        droppedAttributesCount: 0
+      })
+    }
+  }
   let otelStatus: Status
 
   if (status.exit._tag === "Success") {
-    otelStatus = constOtelStatusSuccess
+    otelStatus = { code: StatusCode.Ok }
   } else if (Cause.hasInterruptsOnly(status.exit.cause)) {
     otelStatus = {
       code: StatusCode.Ok,
@@ -242,7 +303,9 @@ const makeOtlpSpan = (self: SpanImpl): OtlpSpan => {
       value: { boolValue: true }
     })
   } else {
-    const errors = Cause.prettyErrors(status.exit.cause)
+    const errors = Cause.prettyErrors(status.exit.cause, {
+      includeCauseInStack: true
+    })
     otelStatus = {
       code: StatusCode.Error
     }
@@ -278,13 +341,21 @@ const makeOtlpSpan = (self: SpanImpl): OtlpSpan => {
     }
   }
 
+  const links: Array<Link> = []
+  for (let i = 0; i < self.links.length; i++) {
+    const link = self.links[i]
+    links.push({
+      traceId: link.span.traceId,
+      spanId: link.span.spanId,
+      attributes: entriesToAttributes(Object.entries(link.attributes)),
+      droppedAttributesCount: 0
+    })
+  }
+
   return {
     traceId: self.traceId,
     spanId: self.spanId,
-    parentSpanId: Option.match(self.parent, {
-      onNone: () => undefined,
-      onSome: (parent) => parent.spanId
-    }),
+    parentSpanId: Option.isSome(self.parent) ? self.parent.value.spanId : undefined,
     name: self.name,
     kind: SpanKind[self.kind],
     startTimeUnixNano: String(status.startTime),
@@ -294,12 +365,7 @@ const makeOtlpSpan = (self: SpanImpl): OtlpSpan => {
     events,
     droppedEventsCount: 0,
     status: otelStatus,
-    links: self.links.map((link) => ({
-      traceId: link.span.traceId,
-      spanId: link.span.spanId,
-      attributes: entriesToAttributes(Object.entries(link.attributes)),
-      droppedAttributesCount: 0
-    })),
+    links,
     droppedLinksCount: 0
   }
 }
@@ -394,7 +460,3 @@ const SpanKind = {
   producer: 4,
   consumer: 5
 } as const
-
-const constOtelStatusSuccess: Status = {
-  code: StatusCode.Ok
-}

@@ -7,18 +7,18 @@ import {
   type LayoutChangeEvent,
   type NativeSyntheticEvent,
   type ViewProps,
-  useColorScheme,
 } from "react-native";
 
 import { AppText as Text } from "../../components/AppText";
 import { MOBILE_TYPOGRAPHY } from "../../lib/typography";
+import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
 import {
   getNativeTerminalHardwareKeyRevision,
   resolveNativeTerminalSurfaceView,
 } from "./nativeTerminalModule";
 import {
   buildGhosttyThemeConfig,
-  getPierreTerminalTheme,
+  getMobileTerminalTheme,
   type TerminalTheme,
 } from "./terminalTheme";
 import { terminalDebugLog } from "./terminalDebugLog";
@@ -37,7 +37,10 @@ interface TerminalSurfaceProps extends ViewProps {
   readonly buffer: string;
   readonly fontSize?: number;
   readonly isRunning: boolean;
+  readonly autoFocus?: boolean;
   readonly keyboardFocusRequest?: number;
+  readonly captureRequest?: number;
+  readonly onCapture?: (text: string) => void;
   readonly theme?: TerminalTheme;
   readonly onInput: (data: string) => void;
   readonly onResize: (size: { readonly cols: number; readonly rows: number }) => void;
@@ -59,8 +62,8 @@ function estimateGridSize(input: {
 const FallbackTerminalSurface = memo(function FallbackTerminalSurface(props: TerminalSurfaceProps) {
   const fontSize = props.fontSize ?? MOBILE_TYPOGRAPHY.label.fontSize;
   const inputRef = useRef<TextInput>(null);
-  const appearanceScheme = useColorScheme() === "light" ? "light" : "dark";
-  const theme = props.theme ?? getPierreTerminalTheme(appearanceScheme);
+  const { themeAppearance, themeId } = useAppearancePreferences();
+  const theme = props.theme ?? getMobileTerminalTheme(themeId, themeAppearance);
   const statusLabel = props.isRunning
     ? "Native terminal unavailable. Using text fallback."
     : "Open terminal to start a shell.";
@@ -82,9 +85,9 @@ const FallbackTerminalSurface = memo(function FallbackTerminalSurface(props: Ter
 
   return (
     <View
+      className="flex-1"
       style={[
         {
-          flex: 1,
           backgroundColor: theme.background,
           borderRadius: 8,
           overflow: "hidden",
@@ -93,19 +96,18 @@ const FallbackTerminalSurface = memo(function FallbackTerminalSurface(props: Ter
       ]}
       onLayout={handleLayout}
     >
-      <View style={{ flex: 1, paddingHorizontal: 10, paddingVertical: 8 }}>
+      <View className="flex-1 px-2.5 py-2">
         <Text
-          className="text-2xs"
+          className="pb-2 text-2xs"
           style={{
             color: theme.mutedForeground,
-            paddingBottom: 8,
           }}
         >
           {statusLabel}
         </Text>
         <ScrollView
-          style={{ flex: 1 }}
-          contentContainerStyle={{ paddingBottom: 12 }}
+          className="flex-1"
+          contentContainerClassName="pb-3"
           showsVerticalScrollIndicator={false}
         >
           <Text
@@ -122,13 +124,9 @@ const FallbackTerminalSurface = memo(function FallbackTerminalSurface(props: Ter
         </ScrollView>
       </View>
       <View
+        className="flex-row items-center gap-2 border-t p-2"
         style={{
-          borderTopWidth: 1,
           borderTopColor: theme.border,
-          flexDirection: "row",
-          alignItems: "center",
-          gap: 8,
-          padding: 8,
         }}
       >
         <TextInput
@@ -150,7 +148,8 @@ const FallbackTerminalSurface = memo(function FallbackTerminalSurface(props: Ter
           onSubmitEditing={(event) => {
             const text = event.nativeEvent.text;
             if (text.length > 0) {
-              props.onInput(`${text}\n`);
+              // Terminal Enter is CR. LF is Ctrl+J and raw-mode TUIs can treat it as J.
+              props.onInput(`${text}\r`);
             }
           }}
         />
@@ -165,13 +164,7 @@ const FallbackTerminalSurface = memo(function FallbackTerminalSurface(props: Ter
           })}
           onPress={() => props.onInput("\u0003")}
         >
-          <Text
-            className="text-2xs"
-            style={{
-              color: theme.foreground,
-              fontFamily: "DMSans_700Bold",
-            }}
-          >
+          <Text className="text-2xs font-t3-bold" style={{ color: theme.foreground }}>
             Ctrl-C
           </Text>
         </Pressable>
@@ -182,8 +175,8 @@ const FallbackTerminalSurface = memo(function FallbackTerminalSurface(props: Ter
 
 export const TerminalSurface = memo(function TerminalSurface(props: TerminalSurfaceProps) {
   const fontSize = props.fontSize ?? MOBILE_TYPOGRAPHY.label.fontSize;
-  const appearanceScheme = useColorScheme() === "light" ? "light" : "dark";
-  const theme = props.theme ?? getPierreTerminalTheme(appearanceScheme);
+  const { themeAppearance, themeId } = useAppearancePreferences();
+  const theme = props.theme ?? getMobileTerminalTheme(themeId, themeAppearance);
   const { onInput, onResize } = props;
   const NativeTerminalSurfaceView = resolveNativeTerminalSurfaceView();
   const hasNativeSurface = Boolean(NativeTerminalSurfaceView);
@@ -224,7 +217,8 @@ export const TerminalSurface = memo(function TerminalSurface(props: TerminalSurf
     return (
       <View style={props.style}>
         <NativeTerminalSurfaceView
-          appearanceScheme={appearanceScheme}
+          appearanceScheme={themeAppearance}
+          autoFocus={props.autoFocus ?? true}
           backgroundColor={theme.background}
           focusRequest={props.isRunning ? (props.keyboardFocusRequest ?? 0) : 0}
           foregroundColor={theme.foreground}
@@ -236,6 +230,8 @@ export const TerminalSurface = memo(function TerminalSurface(props: TerminalSurf
           themeConfig={buildGhosttyThemeConfig(theme)}
           onInput={handleNativeInput}
           onResize={handleNativeResize}
+          captureRequest={props.captureRequest}
+          onCapture={(event) => props.onCapture?.(event.nativeEvent.text)}
         />
       </View>
     );

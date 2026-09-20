@@ -1,42 +1,11 @@
 /**
- * The `Reactivity` module provides process-local invalidation for connecting
- * writes to dependent reads. It does not cache values itself; it tracks keys,
- * registers query handlers, and reruns effects when matching keys are
- * invalidated so queues, streams, UI subscriptions, and read models can stay
- * fresh after successful writes.
+ * Process-local invalidation for connecting writes to dependent reads.
  *
- * **Mental model**
- *
- * A query registers one or more keys, runs once immediately, and publishes each
- * result to a queue or stream. Invalidating any registered key schedules the
- * query to rerun. Mutations wrap an effect and invalidate keys only after it
- * succeeds. Keys can be a flat array, or a record whose property names act as
- * broad namespaces and whose ids address individual records.
- *
- * **Common tasks**
- *
- * - Provide the default in-memory service with {@link layer}.
- * - Use {@link query} when callers need a queue of rerun results.
- * - Use {@link stream} when downstream code should consume reruns as a stream.
- * - Wrap writes with {@link mutation}, or call {@link invalidate} directly when
- *   invalidation is already part of the workflow.
- * - Use the {@link Reactivity} service directly when many invalidations should
- *   be coalesced until a batch exits.
- *
- * **Gotchas**
- *
- * - The default layer is process-local; it does not coordinate invalidations
- *   across processes or cluster runners.
- * - Non-primitive keys are matched by their `Hash.hash` value, so prefer stable
- *   key values over mutable objects.
- * - If a query fails, its queue or stream fails with the same cause.
- * - Invalidations that arrive while a query is already running coalesce into one
- *   follow-up run.
- *
- * **See also**
- *
- * - {@link query}, {@link stream}, {@link mutation}, and {@link invalidate}
- * - {@link layer} and {@link Reactivity}
+ * This module does not cache values itself. It lets callers register handlers
+ * for keys, invalidate those keys, wrap successful mutations so they invalidate
+ * keys, and expose effects as queues or streams that rerun when matching keys
+ * change. The service can also batch invalidations so handlers run after the
+ * batch completes.
  *
  * @since 4.0.0
  */
@@ -53,48 +22,59 @@ import * as Scope from "../../Scope.ts"
 import * as Stream from "../../Stream.ts"
 
 /**
- * Service for key-based reactive invalidation.
+ * Brand type for `Reactivity`.
  *
- * **When to use**
- *
- * Use to provide the invalidation service that refreshes queries, streams, and
- * atoms when application keys change.
- *
- * **Details**
- *
- * The service can register handlers for keys, invalidate those keys, wrap
- * mutations so successful effects invalidate keys, and turn query effects into
- * queues or streams that rerun when keys are invalidated.
- *
- * @category tags
+ * @category type IDs
  * @since 4.0.0
  */
-export class Reactivity extends Context.Service<
-  Reactivity,
-  {
-    readonly invalidateUnsafe: (keys: ReadonlyArray<unknown> | ReadonlyRecord<string, ReadonlyArray<unknown>>) => void
-    readonly registerUnsafe: (
-      keys: ReadonlyArray<unknown> | ReadonlyRecord<string, ReadonlyArray<unknown>>,
-      handler: () => void
-    ) => () => void
-    readonly invalidate: (
-      keys: ReadonlyArray<unknown> | ReadonlyRecord<string, ReadonlyArray<unknown>>
-    ) => Effect.Effect<void>
-    readonly mutation: <A, E, R>(
-      keys: ReadonlyArray<unknown> | ReadonlyRecord<string, ReadonlyArray<unknown>>,
-      effect: Effect.Effect<A, E, R>
-    ) => Effect.Effect<A, E, R>
-    readonly query: <A, E, R>(
-      keys: ReadonlyArray<unknown> | ReadonlyRecord<string, ReadonlyArray<unknown>>,
-      effect: Effect.Effect<A, E, R>
-    ) => Effect.Effect<Queue.Dequeue<A, E>, never, R | Scope.Scope>
-    readonly stream: <A, E, R>(
-      keys: ReadonlyArray<unknown> | ReadonlyRecord<string, ReadonlyArray<unknown>>,
-      effect: Effect.Effect<A, E, R>
-    ) => Stream.Stream<A, E, Exclude<R, Scope.Scope>>
-    readonly withBatch: <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>
-  }
->()("effect/reactivity/Reactivity") {}
+export type TypeId = "~effect/reactivity/Reactivity"
+
+/**
+ * Brand for `Reactivity` implementations.
+ *
+ * @category type IDs
+ * @since 4.0.0
+ */
+export const TypeId: TypeId = "~effect/reactivity/Reactivity"
+
+/**
+ * Registers handlers and reruns queries when their keys are invalidated.
+ *
+ * @category models
+ * @since 4.0.0
+ */
+export interface Reactivity {
+  readonly [TypeId]: TypeId
+  readonly invalidateUnsafe: (keys: ReadonlyArray<unknown> | ReadonlyRecord<string, ReadonlyArray<unknown>>) => void
+  readonly registerUnsafe: (
+    keys: ReadonlyArray<unknown> | ReadonlyRecord<string, ReadonlyArray<unknown>>,
+    handler: () => void
+  ) => () => void
+  readonly invalidate: (
+    keys: ReadonlyArray<unknown> | ReadonlyRecord<string, ReadonlyArray<unknown>>
+  ) => Effect.Effect<void>
+  readonly mutation: <A, E, R>(
+    keys: ReadonlyArray<unknown> | ReadonlyRecord<string, ReadonlyArray<unknown>>,
+    effect: Effect.Effect<A, E, R>
+  ) => Effect.Effect<A, E, R>
+  readonly query: <A, E, R>(
+    keys: ReadonlyArray<unknown> | ReadonlyRecord<string, ReadonlyArray<unknown>>,
+    effect: Effect.Effect<A, E, R>
+  ) => Effect.Effect<Queue.Dequeue<A, E>, never, R | Scope.Scope>
+  readonly stream: <A, E, R>(
+    keys: ReadonlyArray<unknown> | ReadonlyRecord<string, ReadonlyArray<unknown>>,
+    effect: Effect.Effect<A, E, R>
+  ) => Stream.Stream<A, E, Exclude<R, Scope.Scope>>
+  readonly withBatch: <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>
+}
+
+/**
+ * Service key for reactive invalidation.
+ *
+ * @category services
+ * @since 4.0.0
+ */
+export const Reactivity: Context.Service<Reactivity, Reactivity> = Context.Service("effect/reactivity/Reactivity")
 
 /**
  * Creates an in-memory `Reactivity` service.
@@ -122,7 +102,7 @@ export const make = Effect.sync(() => {
     keys: ReadonlyArray<unknown> | ReadonlyRecord<string, ReadonlyArray<unknown>>
   ): Effect.Effect<void> =>
     Effect.contextWith((services) => {
-      const pending = services.mapUnsafe.get(PendingInvalidation.key) as Set<string | number> | undefined
+      const pending = Context.getOrUndefined(services, PendingInvalidation)
       if (pending) {
         keysToHashes(keys, (hash) => {
           pending.add(hash)
@@ -154,7 +134,8 @@ export const make = Effect.sync(() => {
     })
     return () => {
       for (let i = 0; i < resolvedKeys.length; i++) {
-        const set = handlers.get(resolvedKeys[i])!
+        const set = handlers.get(resolvedKeys[i])
+        if (set === undefined) continue
         set.delete(handler)
         if (set.size === 0) {
           handlers.delete(resolvedKeys[i])
@@ -232,6 +213,7 @@ export const make = Effect.sync(() => {
     })
 
   return Reactivity.of({
+    [TypeId]: TypeId,
     mutation,
     query,
     stream,

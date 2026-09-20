@@ -1,27 +1,12 @@
 /**
- * The `ScopedCache` module provides a cache for values that acquire scoped
- * resources during lookup. Each cached entry owns a `Scope`, so resources
- * created while computing a value stay alive for as long as that entry remains
- * cached and are released when the entry is removed.
+ * Caches values that need scoped resource management.
  *
- * A `ScopedCache` is itself created inside a scope. Calls to {@link get} run the
- * lookup effect on cache misses, share the same in-flight lookup among
- * concurrent callers for the same key, and store the resulting exit according
- * to a time-to-live policy. Entries can be inserted manually with {@link set},
- * refreshed with {@link refresh}, inspected without triggering lookup with
- * {@link getOption}, and removed with {@link invalidate} or
- * {@link invalidateAll}. Capacity limits evict the oldest entries.
- *
- * **Lifecycle notes**
- *
- * - Entry scopes are closed when entries expire, are invalidated, are evicted,
- *   are replaced, or when the cache's owning scope closes
- * - Successful and failed lookup exits are both cached according to the
- *   configured TTL
- * - Expired entries may remain counted by {@link size} until a cache operation
- *   observes and removes them
- * - Once the owning scope closes, the cache is closed and lookup-style
- *   operations interrupt instead of acquiring new values
+ * Each cached entry owns its own `Scope`, so resources opened while creating a
+ * value stay alive while that entry is cached and are released when the entry is
+ * removed. A `ScopedCache` also belongs to an outer scope, which closes all
+ * remaining entries when the cache is closed. Lookups for the same missing key
+ * share one in-progress effect, and entries can expire, be refreshed, be
+ * invalidated, or be evicted by capacity limits.
  *
  * @since 4.0.0
  */
@@ -128,7 +113,7 @@ export interface Entry<A, E> {
  *
  * **When to use**
  *
- * Use when cached scoped resources need different lifetimes based on the lookup
+ * Use when you need a scoped cache whose entry lifetime depends on each lookup
  * result or key.
  *
  * **Details**
@@ -226,7 +211,7 @@ export const make = <
 > =>
   makeWith<Key, A, E, R, ServiceMode>({
     ...options,
-    timeToLive: options.timeToLive ? () => options.timeToLive! : defaultTimeToLive
+    timeToLive: options.timeToLive !== undefined ? () => options.timeToLive! : defaultTimeToLive
   })
 
 const Proto = {
@@ -603,6 +588,10 @@ export const invalidateWhen: {
               if (self.state._tag === "Closed") {
                 return effect.succeed(false)
               } else if (f(value)) {
+                const current = MutableHashMap.get(self.state.map, key)
+                if (Option.isNone(current) || current.value !== entry) {
+                  return effect.succeed(false)
+                }
                 MutableHashMap.remove(self.state.map, key)
                 return effect.as(Scope.close(entry.scope, effect.exitVoid), true)
               }
@@ -655,7 +644,7 @@ export const refresh: {
         MutableHashMap.set(self.state.map, key, entry)
         yield* checkCapacity(fiber, self.state.map, self.capacity)
       }
-      const exit = yield* effect.exit(restore(Scope.provide(self.lookup(key), scope)))
+      const exit = yield* effect.exit(effect.suspend(() => restore(Scope.provide(self.lookup(key), scope))))
       Deferred.doneUnsafe(deferred, exit)
       // @ts-ignore async gap
       if (self.state._tag === "Closed") {
@@ -671,6 +660,7 @@ export const refresh: {
       if (!newEntry) {
         const oentry = MutableHashMap.get(self.state.map, key)
         MutableHashMap.set(self.state.map, key, entry)
+        yield* checkCapacity(fiber, self.state.map, self.capacity)
         if (Option.isSome(oentry)) {
           yield* Scope.close(oentry.value.scope, effect.exitVoid)
         }
@@ -707,11 +697,13 @@ const invalidateAllImpl = <Key, A, E>(
   parent: Fiber.Fiber<unknown, unknown>,
   map: MutableHashMap.MutableHashMap<Key, Entry<A, E>>
 ): Effect.Effect<void> => {
+  // Detach the batch before finalizers can reenter the cache.
+  const entries = Array.from(MutableHashMap.values(map))
+  MutableHashMap.clear(map)
   const fibers = Arr.empty<Fiber.Fiber<unknown, unknown>>()
-  for (const [, entry] of map) {
+  for (const entry of entries) {
     fibers.push(effect.forkUnsafe(parent as any, Scope.close(entry.scope, effect.exitVoid), true, true))
   }
-  MutableHashMap.clear(map)
   return effect.fiberAwaitAll(fibers)
 }
 

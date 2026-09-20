@@ -1,9 +1,9 @@
-import { SymbolView } from "expo-symbols";
+import { SymbolView } from "../../components/AppSymbol";
 import { Platform, Pressable } from "react-native";
-import { useThemeColor } from "../../lib/useThemeColor";
 
 import { AppText as Text } from "../../components/AppText";
 import { cn } from "../../lib/cn";
+import { MaterialButton } from "../../components/MaterialButton";
 
 const CARD_SHADOW = Platform.select({
   ios: {
@@ -33,37 +33,27 @@ export function ConnectionSheetButton(props: {
   readonly disabled?: boolean;
   readonly tone?: "primary" | "secondary" | "danger";
   readonly compact?: boolean;
+  readonly fullWidth?: boolean;
   readonly onPress: () => void;
 }) {
+  if (Platform.OS === "android")
+    return (
+      <MaterialButton
+        label={props.label}
+        disabled={props.disabled}
+        onPress={props.onPress}
+        tone={props.tone}
+        fullWidth={props.fullWidth}
+      />
+    );
   const tone = props.tone ?? "secondary";
 
-  const primaryBg = useThemeColor("--color-primary");
-  const primaryFg = useThemeColor("--color-primary-foreground");
-  const dangerBg = useThemeColor("--color-danger");
-  const dangerBorderColor = useThemeColor("--color-danger-border");
-  const dangerFg = useThemeColor("--color-danger-foreground");
-  const secondaryBg = useThemeColor("--color-secondary");
-  const secondaryFg = useThemeColor("--color-secondary-foreground");
-  const borderColor = useThemeColor("--color-border");
-
-  const colors =
+  const textColorClassName =
     tone === "primary"
-      ? {
-          backgroundColor: primaryBg,
-          borderColor: "transparent",
-          textColor: primaryFg,
-        }
+      ? "accent-primary-foreground"
       : tone === "danger"
-        ? {
-            backgroundColor: dangerBg,
-            borderColor: dangerBorderColor,
-            textColor: dangerFg,
-          }
-        : {
-            backgroundColor: secondaryBg,
-            borderColor: borderColor,
-            textColor: secondaryFg,
-          };
+        ? "accent-danger-foreground"
+        : "accent-secondary-foreground";
 
   const primaryShadow =
     tone === "primary"
@@ -80,32 +70,39 @@ export function ConnectionSheetButton(props: {
 
   return (
     <Pressable
+      accessibilityLabel={props.label}
+      accessibilityRole="button"
+      accessibilityState={{ disabled: props.disabled ?? false }}
       className={cn(
         props.compact
           ? "min-h-[42px] flex-row items-center justify-center gap-1.5 rounded-[14px] px-3.5 py-2.5"
           : "min-h-[48px] flex-row items-center justify-center gap-2 rounded-[16px] px-4 py-3",
+        "disabled:opacity-50",
+        tone === "primary"
+          ? "bg-primary"
+          : tone === "danger"
+            ? "border border-danger-border bg-danger"
+            : "border border-border bg-secondary",
       )}
       disabled={props.disabled}
       onPress={props.onPress}
-      style={[
-        {
-          backgroundColor: colors.backgroundColor,
-          borderWidth: tone === "primary" ? 0 : 1,
-          borderColor: colors.borderColor,
-          opacity: props.disabled ? 0.5 : 1,
-        },
-        primaryShadow,
-      ]}
+      style={primaryShadow}
     >
       <SymbolView
         name={props.icon}
         size={props.compact ? 13 : 14}
-        tintColor={colors.textColor}
+        tintColorClassName={textColorClassName}
         type="monochrome"
       />
       <Text
-        className="text-xs font-t3-bold uppercase"
-        style={{ color: colors.textColor, letterSpacing: 0.8 }}
+        className={cn(
+          "text-xs font-t3-bold tracking-[0.8px] uppercase",
+          tone === "primary"
+            ? "text-primary-foreground"
+            : tone === "danger"
+              ? "text-danger-foreground"
+              : "text-secondary-foreground",
+        )}
       >
         {props.label}
       </Text>

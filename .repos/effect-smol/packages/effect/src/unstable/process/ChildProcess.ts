@@ -1,43 +1,11 @@
 /**
- * An Effect-native module for working with child processes.
+ * Describes child processes before they are started.
  *
- * This module uses an AST-based approach where commands are built first
- * using `make` and `pipeTo`, then executed using `spawn`.
- *
- * **Example** (Spawning and piping commands)
- *
- * ```ts
- * import { Effect, Stream } from "effect"
- * import { NodeServices } from "@effect/platform-node"
- * import { ChildProcess } from "effect/unstable/process"
- *
- * // Build a command
- * const command = ChildProcess.make`echo "hello world"`
- *
- * // Spawn and collect output
- * const program = Effect.gen(function*() {
- *   // You can `yield*` a command, which calls `ChildProcess.spawn`
- *   const handle = yield* command
- *   const chunks = yield* Stream.runCollect(handle.stdout)
- *   const exitCode = yield* handle.exitCode
- *   return { chunks, exitCode }
- * }).pipe(Effect.scoped, Effect.provide(NodeServices.layer))
- *
- * // With options
- * const withOptions = ChildProcess.make({ cwd: "/tmp" })`ls -la`
- *
- * // Piping commands
- * const pipeline = ChildProcess.make`cat package.json`.pipe(
- *   ChildProcess.pipeTo(ChildProcess.make`grep name`)
- * )
- *
- * // Spawn the pipeline
- * const pipelineProgram = Effect.gen(function*() {
- *   const handle = yield* pipeline
- *   const chunks = yield* Stream.runCollect(handle.stdout)
- *   return chunks
- * }).pipe(Effect.scoped, Effect.provide(NodeServices.layer))
- * ```
+ * A `Command` stores the executable, arguments, environment, standard streams,
+ * working directory, and other process options. Commands can also be piped
+ * together. A command is an `Effect`; running it asks the
+ * `ChildProcessSpawner` service to start the process and returns a
+ * `ChildProcessHandle`.
  *
  * @since 4.0.0
  */
@@ -53,7 +21,7 @@ import type * as Sink from "../../Sink.ts"
 import type * as Stream from "../../Stream.ts"
 import { type ChildProcessHandle, ChildProcessSpawner } from "./ChildProcessSpawner.ts"
 
-const TypeId = "~effect/unstable/process/ChildProcess"
+const TypeId = "~effect/process/ChildProcess"
 
 /**
  * A command that can be built using `make`, combined using `pipeTo`, and executed using `exec` or `spawn`.
@@ -137,16 +105,17 @@ export type PipeToOption = "stdin" | `fd${number}`
  *
  * **Example** (Piping stderr between commands)
  *
- * ```ts
+ * ```ts import.meta.vitest
  * import { ChildProcess } from "effect/unstable/process"
  *
  * // Pipe stderr instead of stdout
  * const pipeline = ChildProcess.make`my-program`.pipe(
  *   ChildProcess.pipeTo(ChildProcess.make`grep error`, { from: "stderr" })
  * )
+ * const result = [pipeline._tag, pipeline.options.from] // => ["PipedCommand", "stderr"]
  * ```
  *
- * @category models
+ * @category options
  * @since 4.0.0
  */
 export interface PipeOptions {
@@ -267,7 +236,7 @@ export type Encoding =
 /**
  * Options that can be used to control how a child process is terminated.
  *
- * @category models
+ * @category options
  * @since 4.0.0
  */
 export interface KillOptions {
@@ -278,8 +247,12 @@ export interface KillOptions {
   /**
    * The duration of time to wait after the child process has been terminated
    * before forcefully killing the child process by sending it the `"SIGKILL"`
-   * signal. Defaults to `undefined`, which means that no timeout will be
-   * enforced by default.
+   * signal. Defaults to `undefined`, so `"SIGKILL"` is never sent.
+   *
+   * **Details**
+   *
+   * The spawner decides whether to terminate descendants and how long to wait.
+   * See its platform module documentation, such as `NodeChildProcessSpawner`.
    */
   readonly forceKillAfter?: Duration.Input | undefined
 }
@@ -399,7 +372,7 @@ export type AdditionalFdConfig =
 /**
  * Options for command execution.
  *
- * @category models
+ * @category options
  * @since 4.0.0
  */
 export interface CommandOptions extends KillOptions {
@@ -415,6 +388,11 @@ export interface CommandOptions extends KillOptions {
    * If `extendEnv` is set to `true`, the value of `env` will be merged with
    * the value of `globalThis.process.env`, prioritizing the values in `env`
    * when conflicts exist.
+   *
+   * **Gotchas**
+   *
+   * Without `extendEnv: true`, providing `env` replaces the inherited child
+   * environment. The child will not receive `PATH` unless `env` includes it.
    */
   readonly env?: Record<string, string | undefined> | undefined
   /**
@@ -424,7 +402,9 @@ export interface CommandOptions extends KillOptions {
    *
    * **Details**
    *
-   * If set to `false`, only the value of `env` is used.
+   * If set to `false` and `env` is provided, only the value of `env` is used.
+   *
+   * @default false
    */
   readonly extendEnv?: boolean | undefined
   /**
@@ -457,6 +437,16 @@ export interface CommandOptions extends KillOptions {
    */
   readonly detached?: boolean | undefined
   /**
+   * If set to `true`, prevents the child process's console or GUI window from
+   * becoming visible on Windows.
+   *
+   * **Details**
+   *
+   * Defaults to `true` unless `detached` is set to `true`. This option has no
+   * effect on non-Windows platforms.
+   */
+  readonly windowsHide?: boolean | undefined
+  /**
    * Configuration options for the standard input stream for the child process.
    */
   readonly stdin?: CommandInput | StdinConfig | undefined
@@ -482,7 +472,7 @@ export interface CommandOptions extends KillOptions {
    *
    * **Example** (Configuring additional file descriptors)
    *
-   * ```ts
+   * ```ts import.meta.vitest
    * import { ChildProcess } from "effect/unstable/process"
    *
    * // Output fd3 - read data from child
@@ -498,6 +488,8 @@ export interface CommandOptions extends KillOptions {
    *     fd3: { type: "input" }
    *   }
    * })
+   * const result = [cmd1.options.additionalFds?.fd3?.type, cmd2.options.additionalFds?.fd3?.type]
+   * result // => ["output", "input"]
    * ```
    */
   readonly additionalFds?: Record<`fd${number}`, AdditionalFdConfig> | undefined
@@ -596,7 +588,7 @@ const makePipedCommand = (
  *
  * **Example** (Creating commands)
  *
- * ```ts
+ * ```ts import.meta.vitest
  * import { ChildProcess } from "effect/unstable/process"
  *
  * // Template literal form
@@ -607,6 +599,8 @@ const makePipedCommand = (
  *
  * // Array form
  * const cmd3 = ChildProcess.make("git", ["status"])
+ *
+ * const result = [cmd1.command, cmd2.options.cwd, cmd3.args[0]] // => ["echo", "/tmp", "status"]
  * ```
  *
  * @category constructors
@@ -677,7 +671,7 @@ export const make: {
  *
  * **Example** (Piping command output)
  *
- * ```ts
+ * ```ts import.meta.vitest
  * import { ChildProcess } from "effect/unstable/process"
  *
  * // Pipe stdout (default)
@@ -694,6 +688,9 @@ export const make: {
  * const pipeline3 = ChildProcess.make`my-program`.pipe(
  *   ChildProcess.pipeTo(ChildProcess.make`tee output.log`, { from: "all" })
  * )
+ *
+ * const result = [pipeline1._tag, pipeline2.options.from, pipeline3.options.from]
+ * result // => ["PipedCommand", "stderr", "all"]
  * ```
  *
  * @category combinators
@@ -716,7 +713,7 @@ export const pipeTo: {
  *
  * **Example** (Prefixing commands)
  *
- * ```ts
+ * ```ts import.meta.vitest
  * import { ChildProcess } from "effect/unstable/process"
  *
  * const command = ChildProcess.make`echo "foo"`
@@ -726,6 +723,8 @@ export const pipeTo: {
  * )
  *
  * // now prefixed will execute `time echo "foo"`
+ * const result = prefixed._tag === "StandardCommand" ? `${prefixed.command} ${prefixed.args[0]}` : prefixed._tag
+ * result // => "time echo"
  * ```
  *
  * @category combinators
@@ -784,12 +783,13 @@ const applyPrefix = (self: Command, prefixSpec: PrefixSpec): Command => {
  *
  * **Example** (Setting command working directories)
  *
- * ```ts
+ * ```ts import.meta.vitest
  * import { ChildProcess } from "effect/unstable/process"
  *
  * const cmd = ChildProcess.make`ls -la`.pipe(
  *   ChildProcess.setCwd("/tmp")
  * )
+ * const result = cmd._tag === "StandardCommand" && cmd.options.cwd // => "/tmp"
  * ```
  *
  * @category combinators
@@ -822,12 +822,13 @@ export const setCwd: {
  *
  * **Example** (Setting command environment variables)
  *
- * ```ts
+ * ```ts import.meta.vitest
  * import { ChildProcess } from "effect/unstable/process"
  *
  * const cmd = ChildProcess.make`node script.js`.pipe(
  *   ChildProcess.setEnv({ NODE_ENV: "test" })
  * )
+ * const result = cmd._tag === "StandardCommand" && cmd.options.env?.NODE_ENV // => "test"
  * ```
  *
  * @category combinators
@@ -864,7 +865,7 @@ const isTemplateString = (u: unknown): u is TemplateStringsArray =>
  * Parses an fd name like "fd3" to its numeric index.
  * Returns undefined if the name is invalid.
  *
- * @category utils
+ * @category converting
  * @since 4.0.0
  */
 export const parseFdName = (name: string): number | undefined => {
@@ -877,7 +878,7 @@ export const parseFdName = (name: string): number | undefined => {
 /**
  * Create an fd name from its numeric index.
  *
- * @category utils
+ * @category converting
  * @since 4.0.0
  */
 export const fdName = (fd: number): string => `fd${fd}`
@@ -1021,8 +1022,13 @@ const splitByWhitespaces = (template: string, rawTemplate: string): {
         rawIndex += 1
       } else if (nextRawCharacter === "u" && rawTemplate[rawIndex + 2] === "{") {
         // Handle variable-length unicode escape sequences (i.e. `\u{1F600}`) by:
+        // - Advancing the template index an extra code unit for astral code points
         // - Advancing the raw template index past the unicode escape sequence
-        rawIndex = rawTemplate.indexOf("}", rawIndex + 3)
+        const end = rawTemplate.indexOf("}", rawIndex + 3)
+        if (parseInt(rawTemplate.slice(rawIndex + 3, end), 16) > 0xffff) {
+          templateIndex += 1
+        }
+        rawIndex = end
       } else {
         // Advance raw template index past fixed-length escape sequences:
         // - \n    → 2 chars (backslash + n)

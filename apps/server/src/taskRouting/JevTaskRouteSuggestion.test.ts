@@ -5,7 +5,7 @@ import { describe, expect } from "vite-plus/test";
 
 import { make } from "./JevTaskRouteSuggestion.ts";
 
-const readyResponse = (lane: "code" | "luna" | "terra" | "astra", confidence = 1) => ({
+const readyResponse = (lane: "luna" | "terra" | "sol" | "astra", confidence = 1) => ({
   ok: true,
   json: async () => ({
     answers: {
@@ -13,7 +13,7 @@ const readyResponse = (lane: "code" | "luna" | "terra" | "astra", confidence = 1
         type: "choice",
         choice: lane,
         probabilities: {
-          code: lane === "code" ? 1 : 0,
+          sol: lane === "sol" ? 1 : 0,
           luna: lane === "luna" ? 1 : 0,
           terra: lane === "terra" ? 1 : 0,
           astra: lane === "astra" ? 1 : 0,
@@ -36,7 +36,7 @@ describe("JevTaskRouteSuggestion", () => {
         },
         fetch: async () => {
           fetchCalls += 1;
-          return readyResponse("code");
+          return readyResponse("luna");
         },
       });
       expect(yield* service.suggest({ task: "Add a button" })).toEqual({
@@ -53,7 +53,7 @@ describe("JevTaskRouteSuggestion", () => {
         getEnvironmentVariable: () => undefined,
         fetch: async () => {
           fetchCalls += 1;
-          return readyResponse("code");
+          return readyResponse("luna");
         },
       });
       expect(yield* service.suggest({ task: "Use this API key: sk_example_123456789012" })).toEqual(
@@ -63,6 +63,10 @@ describe("JevTaskRouteSuggestion", () => {
         },
       );
       expect(yield* service.suggest({ task: "Continue the previous turn" })).toEqual({
+        status: "blocked",
+        reason: "continuation",
+      });
+      expect(yield* service.suggest({ task: "Fix it." })).toEqual({
         status: "blocked",
         reason: "continuation",
       });
@@ -80,11 +84,11 @@ describe("JevTaskRouteSuggestion", () => {
           requestedPaths.push(path);
           return "TYPESAFE_API_KEY=test-key";
         },
-        fetch: async () => readyResponse("code"),
+        fetch: async () => readyResponse("luna"),
       });
       expect(yield* service.suggest({ task: "Classify a task" })).toMatchObject({
         status: "ready",
-        lane: "code",
+        lane: "luna",
       });
       expect(requestedPaths).toEqual(["/safe/.config/typesafe/dev.env"]);
     }),
@@ -153,7 +157,7 @@ describe("JevTaskRouteSuggestion", () => {
           now: () => now,
           fetch: async () => {
             fetchCalls += 1;
-            return readyResponse("code");
+            return readyResponse("luna");
           },
         });
         expect(yield* rateLimited.suggest({ task: "First task" })).toMatchObject({
@@ -164,6 +168,55 @@ describe("JevTaskRouteSuggestion", () => {
           status: "unavailable",
         });
         expect(fetchCalls).toBe(1);
+      }),
+  );
+
+  it.effect("offers only available models and sends only the submitted task as state", () =>
+    Effect.gen(function* () {
+      let sent:
+        | { state: string; questions: { route: { criteria: Record<string, string> } } }
+        | undefined;
+      const service = yield* make({
+        getEnvironmentVariable: () => "test-key",
+        fetch: async (_url, init) => {
+          sent = JSON.parse(String(init.body));
+          return readyResponse("sol", 0.9);
+        },
+      });
+      expect(
+        yield* service.suggest({
+          task: "Evaluate a complex design",
+          availableLanes: ["terra", "sol"],
+        }),
+      ).toMatchObject({ status: "ready", lane: "sol", reason: "analysis" });
+      expect(sent?.state).toBe("Evaluate a complex design");
+      expect(Object.keys(sent?.questions.route.criteria ?? {})).toEqual(["terra", "sol"]);
+    }),
+  );
+
+  it.effect(
+    "rejects a result outside the offered models and avoids calls with no meaningful choice",
+    () =>
+      Effect.gen(function* () {
+        let calls = 0;
+        const service = yield* make({
+          getEnvironmentVariable: () => "test-key",
+          fetch: async () => {
+            calls += 1;
+            return readyResponse("astra");
+          },
+        });
+        expect(yield* service.suggest({ task: "Format a list", availableLanes: ["luna"] })).toEqual(
+          { status: "unavailable" },
+        );
+        expect(yield* service.suggest({ task: "Format a list", availableLanes: [] })).toEqual({
+          status: "unavailable",
+        });
+        expect(calls).toBe(0);
+        expect(
+          yield* service.suggest({ task: "Format a list", availableLanes: ["luna", "terra"] }),
+        ).toEqual({ status: "unavailable" });
+        expect(calls).toBe(1);
       }),
   );
 
@@ -179,7 +232,7 @@ describe("JevTaskRouteSuggestion", () => {
         fetch: async () => {
           fetchCalls += 1;
           await pending;
-          return readyResponse("code");
+          return readyResponse("luna");
         },
       });
       const first = yield* service

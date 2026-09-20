@@ -1,3 +1,6 @@
+import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { resolveMediaSource } from "@t3tools/client-runtime/media-source";
+import { getBrowseDirectoryPath } from "@t3tools/client-runtime/state/projects";
 import { useCallback, useMemo, useState } from "react";
 import {
   Markdown,
@@ -8,17 +11,24 @@ import {
 import { RefreshControl, ScrollView, Text as NativeText, View } from "react-native";
 
 import { tryOpenExternalUrl } from "../../lib/openExternalUrl";
+import { useFontFamily } from "../../lib/useFontFamily";
 import {
   resolveMarkdownFontSizes,
   resolveNativeMarkdownTypography,
 } from "../../lib/appearancePreferences";
-import { useThemeColor } from "../../lib/useThemeColor";
+import { useUniwindTheme } from "../../lib/useUniwindTheme";
+import {
+  ThreadMarkdownImage,
+  ThreadMarkdownImageUnavailable,
+} from "../threads/ThreadMarkdownImage";
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
 import {
   hasNativeSelectableMarkdownText,
   SelectableMarkdownText,
+  type MarkdownImageRenderer,
   type NativeMarkdownTextStyle,
 } from "../../native/SelectableMarkdownText";
+import { resolveWorkspaceFilePath } from "./filePath";
 
 interface MarkdownPreviewStyles {
   readonly theme: PartialMarkdownTheme;
@@ -27,7 +37,7 @@ interface MarkdownPreviewStyles {
   readonly nativeTextStyle: NativeMarkdownTextStyle;
 }
 
-function useMarkdownPreviewStyles(): MarkdownPreviewStyles {
+function useMarkdownPreviewStyles(renderImage?: MarkdownImageRenderer): MarkdownPreviewStyles {
   const { appearance } = useAppearancePreferences();
   const markdownFontSizes = useMemo(
     () => resolveMarkdownFontSizes(appearance.baseFontSize),
@@ -37,19 +47,24 @@ function useMarkdownPreviewStyles(): MarkdownPreviewStyles {
     () => resolveNativeMarkdownTypography(appearance.baseFontSize),
     [appearance.baseFontSize],
   );
-  const body = String(useThemeColor("--color-md-body"));
-  const strong = String(useThemeColor("--color-md-strong"));
-  const link = String(useThemeColor("--color-md-link"));
-  const blockquoteBorder = String(useThemeColor("--color-md-blockquote-border"));
-  const blockquoteBackground = String(useThemeColor("--color-md-blockquote-bg"));
-  const codeBackground = String(useThemeColor("--color-md-code-bg"));
-  const codeText = String(useThemeColor("--color-md-code-text"));
-  const horizontalRule = String(useThemeColor("--color-md-hr"));
+  const theme = useUniwindTheme();
+  const body = theme["--color-md-body"];
+  const strong = theme["--color-md-strong"];
+  const link = theme["--color-md-link"];
+  const blockquoteBorder = theme["--color-md-blockquote-border"];
+  const blockquoteBackground = theme["--color-md-blockquote-bg"];
+  const codeBackground = theme["--color-md-code-bg"];
+  const codeText = theme["--color-md-code-text"];
+  const horizontalRule = theme["--color-md-hr"];
+  const regularFontFamily = useFontFamily("regular");
+  const mediumFontFamily = useFontFamily("medium");
+  const boldFontFamily = useFontFamily("bold");
 
   return useMemo(() => {
     const renderers: CustomRenderers = {
       link: ({ href, children }) => (
         <NativeText
+          className="font-t3-medium"
           onPress={() => {
             if (href) {
               void tryOpenExternalUrl(href, "markdown-link");
@@ -57,13 +72,20 @@ function useMarkdownPreviewStyles(): MarkdownPreviewStyles {
           }}
           style={{
             color: link,
-            fontFamily: "DMSans_500Medium",
             textDecorationLine: "none",
           }}
         >
           {children}
         </NativeText>
       ),
+      image: ({ node }) =>
+        node.href && renderImage
+          ? (renderImage({
+              href: node.href,
+              alt: node.alt ?? null,
+              title: node.title ?? null,
+            }) ?? undefined)
+          : undefined,
     };
 
     return {
@@ -74,11 +96,14 @@ function useMarkdownPreviewStyles(): MarkdownPreviewStyles {
           link,
           blockquote: blockquoteBorder,
           border: horizontalRule,
+          surface: "transparent",
           surfaceLight: blockquoteBackground,
           accent: link,
           tableBorder: horizontalRule,
           tableHeader: blockquoteBackground,
           tableHeaderText: strong,
+          tableRowOdd: blockquoteBackground,
+          tableRowEven: "transparent",
           code: codeText,
           codeBackground,
         },
@@ -86,21 +111,21 @@ function useMarkdownPreviewStyles(): MarkdownPreviewStyles {
       styles: {
         text: {
           color: body,
-          fontFamily: "DMSans_400Regular",
+          fontFamily: regularFontFamily,
           fontSize: markdownFontSizes.m,
           lineHeight: markdownFontSizes.bodyLineHeight,
         },
         heading: {
           color: strong,
-          fontFamily: "DMSans_700Bold",
+          fontFamily: boldFontFamily,
         },
         strong: {
           color: strong,
-          fontFamily: "DMSans_700Bold",
+          fontFamily: boldFontFamily,
         },
         link: {
           color: link,
-          fontFamily: "DMSans_500Medium",
+          fontFamily: mediumFontFamily,
         },
         blockquote: {
           backgroundColor: blockquoteBackground,
@@ -141,9 +166,9 @@ function useMarkdownPreviewStyles(): MarkdownPreviewStyles {
         fontSize: nativeMarkdownTypography.fontSize,
         lineHeight: nativeMarkdownTypography.lineHeight,
         headingFontSizes: nativeMarkdownTypography.headingFontSizes,
-        fontFamily: "DMSans_400Regular",
-        headingFontFamily: "DMSans_700Bold",
-        boldFontFamily: "DMSans_700Bold",
+        fontFamily: regularFontFamily,
+        headingFontFamily: boldFontFamily,
+        boldFontFamily,
       },
     };
   }, [
@@ -155,13 +180,23 @@ function useMarkdownPreviewStyles(): MarkdownPreviewStyles {
     horizontalRule,
     link,
     markdownFontSizes,
+    mediumFontFamily,
     nativeMarkdownTypography,
+    regularFontFamily,
+    renderImage,
     strong,
+    boldFontFamily,
   ]);
 }
 
 export function FileMarkdownPreview(props: {
+  readonly cwd: string;
+  readonly captured?: boolean;
+  readonly environmentId: EnvironmentId;
   readonly markdown: string;
+  readonly relativePath: string;
+  /** Absent for a file opened from a project draft, which has no thread yet. */
+  readonly threadId: ThreadId | null;
   readonly onRefresh?: () => Promise<void> | void;
 }) {
   const [isPullRefreshing, setIsPullRefreshing] = useState(false);
@@ -176,7 +211,41 @@ export function FileMarkdownPreview(props: {
       setIsPullRefreshing(false);
     }
   }, [props.onRefresh]);
-  const styles = useMarkdownPreviewStyles();
+  const markdownDirectory = useMemo(
+    () => getBrowseDirectoryPath(resolveWorkspaceFilePath(props.cwd, props.relativePath)),
+    [props.cwd, props.relativePath],
+  );
+  const renderImage = useCallback<MarkdownImageRenderer>(
+    (image) => {
+      const media = resolveMediaSource(image.href, {
+        threadId: props.threadId ?? undefined,
+        workspaceRoot: markdownDirectory,
+        imageEmbed: true,
+      });
+      if (media?.access === "direct") {
+        return null;
+      }
+      if (
+        props.captured ||
+        media === null ||
+        media.kind !== "image" ||
+        media.access === "unavailable"
+      ) {
+        return <ThreadMarkdownImageUnavailable alt={image.alt} />;
+      }
+      return (
+        <ThreadMarkdownImage
+          environmentId={props.environmentId}
+          resource={media.resource}
+          alt={image.alt}
+          srcFragment={media.srcFragment}
+          onPressPreview={() => undefined}
+        />
+      );
+    },
+    [markdownDirectory, props.environmentId, props.threadId, props.captured],
+  );
+  const styles = useMarkdownPreviewStyles(renderImage);
   const onLinkPress = useCallback((href: string) => {
     void tryOpenExternalUrl(href, "markdown-link");
   }, []);
@@ -199,6 +268,7 @@ export function FileMarkdownPreview(props: {
           <SelectableMarkdownText
             markdown={props.markdown}
             onLinkPress={onLinkPress}
+            renderImage={renderImage}
             textStyle={styles.nativeTextStyle}
           />
         ) : (

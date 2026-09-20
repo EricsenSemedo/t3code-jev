@@ -15,43 +15,47 @@ const PROCESSED_PREFIX = "processed/";
 
 export class BucketEventSourceFunction extends Lambda.Function<BucketEventSourceFunction>()(
   "BucketEventSourceFunction",
-  {
-    main: import.meta.filename,
-    url: true,
-  },
 ) {}
 
 export default BucketEventSourceFunction.make(
+  {
+    main: import.meta.url,
+    functionUrl: true,
+  },
   Effect.gen(function* () {
     const bucket = yield* S3.Bucket("EventSourceBucket", {
       forceDestroy: true,
     });
 
-    const putObject = yield* S3.PutObject.bind(bucket);
-    const getObject = yield* S3.GetObject.bind(bucket);
+    const putObject = yield* S3.PutObject(bucket);
+    const getObject = yield* S3.GetObject(bucket);
+    const BucketName = yield* bucket.bucketName;
 
     // Subscribe to object-created events under `incoming/`. Each notification
     // writes a derived object under `processed/<name>` recording the event.
-    yield* S3.notifications(bucket, {
-      events: ["s3:ObjectCreated:*"],
-      prefix: INCOMING_PREFIX,
-    }).subscribe((stream) =>
-      stream.pipe(
-        Stream.runForEach((event) =>
-          Effect.gen(function* () {
-            const name = event.key.slice(INCOMING_PREFIX.length);
-            yield* putObject({
-              Key: `${PROCESSED_PREFIX}${name}`,
-              Body: JSON.stringify({
-                key: event.key,
-                size: event.size,
-                eTag: event.eTag,
-              }),
-              ContentType: "application/json",
-            });
-          }).pipe(Effect.orDie),
+    yield* S3.consumeBucketEvents(
+      bucket,
+      {
+        events: ["s3:ObjectCreated:*"],
+        prefix: INCOMING_PREFIX,
+      },
+      (stream) =>
+        stream.pipe(
+          Stream.runForEach((event) =>
+            Effect.gen(function* () {
+              const name = event.key.slice(INCOMING_PREFIX.length);
+              yield* putObject({
+                Key: `${PROCESSED_PREFIX}${name}`,
+                Body: JSON.stringify({
+                  key: event.key,
+                  size: event.size,
+                  eTag: event.eTag,
+                }),
+                ContentType: "application/json",
+              });
+            }).pipe(Effect.orDie),
+          ),
         ),
-      ),
     );
 
     return {
@@ -59,6 +63,19 @@ export default BucketEventSourceFunction.make(
         const request = yield* HttpServerRequest;
         const url = new URL(request.originalUrl);
         const pathname = url.pathname;
+
+        if (request.method === "GET" && pathname === "/bucket-name") {
+          // The first event after a cold start can observe not-yet-hydrated
+          // resource Outputs — answer 503 so the test retries instead of
+          // recording "undefined" as the bucket name.
+          const bucketName = yield* BucketName;
+          if (!bucketName) {
+            return HttpServerResponse.text("Outputs not hydrated yet", {
+              status: 503,
+            });
+          }
+          return yield* HttpServerResponse.json({ bucketName });
+        }
 
         if (request.method === "POST" && pathname === "/put") {
           const body = (yield* request.json) as { key: string; value: string };
@@ -84,14 +101,12 @@ export default BucketEventSourceFunction.make(
             ),
             // Object not written yet — the test polls until it appears.
             Effect.catchTag("NoSuchKey", () =>
-              Effect.succeed(
-                HttpServerResponse.json({ processed: null }, { status: 404 }),
-              ),
+              HttpServerResponse.json({ processed: null }, { status: 404 }),
             ),
           );
         }
 
-        return HttpServerResponse.json(
+        return yield* HttpServerResponse.json(
           { error: "Not found", pathname },
           { status: 404 },
         );
@@ -101,8 +116,8 @@ export default BucketEventSourceFunction.make(
     Effect.provide(
       Layer.mergeAll(
         Lambda.BucketEventSource,
-        S3.PutObjectLive,
-        S3.GetObjectLive,
+        S3.PutObjectHttp,
+        S3.GetObjectHttp,
       ),
     ),
   ),

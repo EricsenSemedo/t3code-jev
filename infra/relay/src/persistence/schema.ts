@@ -21,9 +21,12 @@ export const relayMobileDevices = pgTable(
     userId: varchar("user_id", { length: 255 }).notNull(),
     deviceId: varchar("device_id", { length: 255 }).notNull(),
     label: text("label").notNull().default("iOS device"),
-    platform: varchar("platform", { length: 16 }).notNull().$type<"ios">(),
-    iosMajorVersion: integer("ios_major_version").notNull(),
+    platform: varchar("platform", { length: 16 }).notNull().$type<"ios" | "android">(),
+    iosMajorVersion: integer("ios_major_version"),
+    androidApiLevel: integer("android_api_level"),
     appVersion: varchar("app_version", { length: 64 }),
+    bundleId: varchar("bundle_id", { length: 255 }),
+    apsEnvironment: varchar("aps_environment", { length: 16 }).$type<"sandbox" | "production">(),
     pushToken: text("push_token"),
     pushToStartToken: text("push_to_start_token"),
     preferencesJson: jsonb("preferences_json").notNull().$type<RelayAgentAwarenessPreferences>(),
@@ -32,7 +35,6 @@ export const relayMobileDevices = pgTable(
   },
   (table) => [
     primaryKey({ columns: [table.userId, table.deviceId] }),
-    index("idx_relay_mobile_devices_user").on(table.userId),
     uniqueIndex("idx_relay_mobile_devices_push_token").on(table.pushToken),
     uniqueIndex("idx_relay_mobile_devices_push_to_start_token").on(table.pushToStartToken),
   ],
@@ -54,7 +56,6 @@ export const relayLiveActivities = pgTable(
   },
   (table) => [
     primaryKey({ columns: [table.userId, table.deviceId] }),
-    index("idx_relay_live_activities_user").on(table.userId),
     uniqueIndex("idx_relay_live_activities_activity_push_token").on(table.activityPushToken),
   ],
 );
@@ -103,6 +104,13 @@ export const relayManagedEndpointAllocations = pgTable(
   ],
 );
 
+export const relayManagedTunnelLimits = pgTable("relay_managed_tunnel_limits", {
+  userId: varchar("user_id", { length: 191 }).primaryKey(),
+  maxTunnels: integer("max_tunnels").notNull(),
+  createdAt: varchar("created_at", { length: 64 }).notNull(),
+  updatedAt: varchar("updated_at", { length: 64 }).notNull(),
+});
+
 export const relayEnvironmentCredentials = pgTable(
   "relay_environment_credentials",
   {
@@ -130,7 +138,7 @@ export const relayAgentActivityRows = pgTable(
   {
     environmentId: varchar("environment_id", { length: 191 }).notNull(),
     environmentPublicKey: text("environment_public_key").notNull(),
-    threadId: varchar("thread_id", { length: 191 }).notNull(),
+    threadId: varchar("thread_id", { length: 512 }).notNull(),
     stateJson: jsonb("state_json").notNull().$type<RelayAgentActivityState>(),
     updatedAt: varchar("updated_at", { length: 64 }).notNull(),
     createdAt: varchar("created_at", { length: 64 }).notNull(),
@@ -148,7 +156,7 @@ export const relayDeliveryAttempts = pgTable(
     createdAt: varchar("created_at", { length: 64 }).notNull(),
     userId: varchar("user_id", { length: 255 }),
     environmentId: varchar("environment_id", { length: 191 }),
-    threadId: varchar("thread_id", { length: 191 }),
+    threadId: varchar("thread_id", { length: 512 }),
     deviceId: varchar("device_id", { length: 255 }),
     kind: varchar("kind", { length: 64 }).notNull(),
     sourceJobId: varchar("source_job_id", { length: 64 }),
