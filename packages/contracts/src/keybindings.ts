@@ -1,4 +1,6 @@
+import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
+import * as SchemaTransformation from "effect/SchemaTransformation";
 import { TrimmedString } from "./baseSchemas.ts";
 
 export const MAX_KEYBINDING_VALUE_LENGTH = 64;
@@ -84,6 +86,7 @@ export const KeybindingCommand = Schema.Union([
   SCRIPT_RUN_COMMAND_PATTERN,
 ]);
 export type KeybindingCommand = typeof KeybindingCommand.Type;
+const isKeybindingCommand = Schema.is(KeybindingCommand);
 
 export const KeybindingValue = TrimmedString.check(
   Schema.isMinLength(1),
@@ -152,8 +155,34 @@ export const ResolvedKeybindingRule = Schema.Struct({
 }).annotate({ parseOptions: { onExcessProperty: "ignore" } });
 export type ResolvedKeybindingRule = typeof ResolvedKeybindingRule.Type;
 
-export const ResolvedKeybindingsConfig = Schema.Array(ResolvedKeybindingRule).check(
+const ResolvedKeybindingsConfigWire = Schema.Array(Schema.Unknown).check(
   Schema.isMaxLength(MAX_KEYBINDINGS_COUNT),
+);
+const ResolvedKeybindingsConfigKnownRules = Schema.Array(ResolvedKeybindingRule).check(
+  Schema.isMaxLength(MAX_KEYBINDINGS_COUNT),
+);
+
+const hasKnownResolvedKeybindingCommand = (value: unknown): boolean =>
+  typeof value === "object" &&
+  value !== null &&
+  "command" in value &&
+  isKeybindingCommand(value.command);
+
+// Servers can add display-only keybinding commands independently of older clients.
+// Filter only unknown commands at this read boundary; any rule for a command this
+// client understands continues through the strict resolved-rule schema below.
+export const ResolvedKeybindingsConfig = ResolvedKeybindingsConfigWire.pipe(
+  Schema.decodeTo(
+    ResolvedKeybindingsConfigKnownRules,
+    SchemaTransformation.transformOrFail({
+      // `decodeTo` validates this output against the strict target schema.
+      decode: (rules) =>
+        Effect.succeed(
+          rules.filter(hasKnownResolvedKeybindingCommand) as ReadonlyArray<ResolvedKeybindingRule>,
+        ),
+      encode: (rules) => Effect.succeed(rules),
+    }),
+  ),
 );
 export type ResolvedKeybindingsConfig = typeof ResolvedKeybindingsConfig.Type;
 

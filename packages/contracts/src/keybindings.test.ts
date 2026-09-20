@@ -3,6 +3,7 @@ import * as Schema from "effect/Schema";
 import * as Effect from "effect/Effect";
 
 import {
+  MAX_KEYBINDINGS_COUNT,
   KeybindingsConfig,
   KeybindingRule,
   ResolvedKeybindingRule,
@@ -94,6 +95,14 @@ it.effect("rejects invalid command values", () =>
       }),
     );
     assert.strictEqual(result._tag, "Failure");
+
+    const newerServerCommand = yield* Effect.exit(
+      decode(KeybindingRule, {
+        key: "mod+p",
+        command: "filePicker.toggle",
+      }),
+    );
+    assert.strictEqual(newerServerCommand._tag, "Failure");
   }),
 );
 
@@ -170,6 +179,76 @@ it.effect("parses resolved keybindings arrays", () =>
       },
     ]);
     assert.lengthOf(parsed, 2);
+  }),
+);
+
+it.effect("ignores unknown resolved commands from newer servers", () =>
+  Effect.gen(function* () {
+    const parsed = yield* decode(ResolvedKeybindingsConfig, [
+      {
+        command: "terminal.toggle",
+        shortcut: {
+          key: "j",
+          metaKey: false,
+          ctrlKey: false,
+          shiftKey: false,
+          altKey: false,
+          modKey: true,
+        },
+      },
+      {
+        command: "filePicker.toggle",
+        shortcut: {
+          key: "p",
+          metaKey: false,
+          ctrlKey: false,
+          shiftKey: false,
+          altKey: false,
+          modKey: true,
+        },
+      },
+    ]);
+
+    assert.deepStrictEqual(
+      parsed.map((rule) => rule.command),
+      ["terminal.toggle"],
+    );
+  }),
+);
+
+it.effect("rejects malformed rules for known resolved commands", () =>
+  Effect.gen(function* () {
+    const result = yield* Effect.exit(
+      decode(ResolvedKeybindingsConfig, [
+        {
+          command: "terminal.toggle",
+          shortcut: {
+            key: "j",
+            metaKey: false,
+            ctrlKey: false,
+            shiftKey: false,
+            altKey: false,
+          },
+        },
+      ]),
+    );
+
+    assert.strictEqual(result._tag, "Failure");
+  }),
+);
+
+it.effect("keeps the resolved keybindings limit when newer commands are ignored", () =>
+  Effect.gen(function* () {
+    const result = yield* Effect.exit(
+      decode(
+        ResolvedKeybindingsConfig,
+        Array.from({ length: MAX_KEYBINDINGS_COUNT + 1 }, () => ({
+          command: "filePicker.toggle",
+        })),
+      ),
+    );
+
+    assert.strictEqual(result._tag, "Failure");
   }),
 );
 
