@@ -434,7 +434,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
   );
 
-  it.effect("uses the Personal desktop entry class for Linux builds", () =>
+  it.effect("uses the generated Linux desktop entry class", () =>
     Effect.gen(function* () {
       const config = yield* createBuildConfig(
         "linux",
@@ -450,7 +450,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       const desktop = linux.desktop as { readonly entry: Record<string, unknown> };
       assert.equal(config.productName, "T3 Code Personal (Nightly)");
       assert.equal(config.artifactName, "T3-Code-Personal-${version}-${arch}.${ext}");
-      assert.equal(desktop.entry.StartupWMClass, "t3-code-personal");
+      assert.equal(desktop.entry.StartupWMClass, "t3code");
     }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
   );
 
