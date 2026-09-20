@@ -30,7 +30,7 @@ import { Command, Flag } from "effect/unstable/cli";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 const LINUX_ICON_SIZES = [16, 22, 24, 32, 48, 64, 128, 256, 512] as const;
-const DESKTOP_APP_ID = "com.ericsensemedo.t3codecustom";
+const DESKTOP_APP_ID = "com.ericsensemedo.t3codejev";
 const APPLE_TEAM_ID_PATTERN = /^[A-Z0-9]{10}$/u;
 
 const BuildPlatform = Schema.Literals(["mac", "linux", "win"]);
@@ -1332,8 +1332,8 @@ export function resolveMockUpdateServerUrl(mockUpdateServerPort: number | undefi
 
 export function resolveDesktopProductName(version: string): string {
   return resolveDesktopUpdateChannel(version) === "nightly"
-    ? "T3 Code Custom (Nightly)"
-    : (desktopPackageJson.productName ?? "T3 Code Custom");
+    ? "T3 Code Jev (Nightly)"
+    : (desktopPackageJson.productName ?? "T3 Code Jev");
 }
 
 export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
@@ -1353,7 +1353,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   const buildConfig: Record<string, unknown> = {
     appId: DESKTOP_APP_ID,
     productName: resolveDesktopProductName(version),
-    artifactName: "T3-Code-Custom-${version}-${arch}.${ext}",
+    artifactName: "T3-Code-Jev-${version}-${arch}.${ext}",
     directories: {
       buildResources: "apps/desktop/resources",
     },

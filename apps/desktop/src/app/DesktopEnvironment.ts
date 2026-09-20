@@ -76,7 +76,7 @@ export class DesktopEnvironment extends Context.Service<
   }
 >()("@t3tools/desktop/app/DesktopEnvironment") {}
 
-const APP_BASE_NAME = "T3 Code Custom";
+const APP_BASE_NAME = "T3 Code Jev";
 
 function resolveDesktopAppStageLabel(input: {
   readonly isDevelopment: boolean;
@@ -147,7 +147,7 @@ const make = Effect.fn("desktop.environment.make")(function* (
       : input.platform === "darwin"
         ? path.join(homeDirectory, "Library", "Application Support")
         : Option.getOrElse(config.xdgConfigHome, () => path.join(homeDirectory, ".config"));
-  const baseDir = Option.getOrElse(config.t3Home, () => path.join(homeDirectory, ".t3-custom"));
+  const baseDir = Option.getOrElse(config.t3Home, () => path.join(homeDirectory, ".t3-jev"));
   const rootDir = path.resolve(input.dirname, "../../..");
   const appRoot = input.isPackaged ? input.appPath : rootDir;
   const branding = resolveDesktopAppBranding({
@@ -156,8 +156,8 @@ const make = Effect.fn("desktop.environment.make")(function* (
   });
   const displayName = branding.displayName;
   const stateDir = path.join(baseDir, isDevelopment ? "dev" : "userdata");
-  const userDataDirName = isDevelopment ? "t3code-custom-dev" : "t3code-custom";
-  const legacyUserDataDirName = isDevelopment ? "T3 Code Custom (Dev)" : "T3 Code Custom (Alpha)";
+  const userDataDirName = isDevelopment ? "t3code-jev-dev" : "t3code-jev";
+  const legacyUserDataDirName = isDevelopment ? "T3 Code Jev (Dev)" : "T3 Code Jev (Alpha)";
   const resourcesPath = input.resourcesPath;
 
   return DesktopEnvironment.of({
@@ -197,10 +197,10 @@ const make = Effect.fn("desktop.environment.make")(function* (
     branding,
     displayName,
     appUserModelId: Option.getOrElse(config.appUserModelIdOverride, () =>
-      isDevelopment ? "com.ericsensemedo.t3codecustom.dev" : "com.ericsensemedo.t3codecustom",
+      isDevelopment ? "com.ericsensemedo.t3codejev.dev" : "com.ericsensemedo.t3codejev",
     ),
-    linuxDesktopEntryName: isDevelopment ? "t3code-custom-dev.desktop" : "t3code-custom.desktop",
-    linuxWmClass: isDevelopment ? "t3code-custom-dev" : "t3code-custom",
+    linuxDesktopEntryName: isDevelopment ? "t3code-jev-dev.desktop" : "t3code-jev.desktop",
+    linuxWmClass: isDevelopment ? "t3code-jev-dev" : "t3code-jev",
     userDataDirName,
     legacyUserDataDirName,
     defaultDesktopSettings: DesktopAppSettings.resolveDefaultDesktopSettings(input.appVersion),

@@ -199,22 +199,33 @@ describe("serializeRelayClientTracingEnvironment", () => {
   });
 });
 
-describe("release workflow tracing config propagation", () => {
-  it.effect("uses an artifact instead of a masked cross-job token output", () =>
-    Effect.gen(function* () {
-      const fileSystem = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const workflowPath = yield* path.fromFileUrl(
-        new URL("../../../.github/workflows/release.yml", import.meta.url),
-      );
-      const workflow = yield* fileSystem.readFileString(workflowPath);
+describe("fork desktop workflow boundary", () => {
+  it.effect(
+    "publishes updater assets without deploying the upstream relay or tracing configuration",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const nightlyWorkflowPath = yield* path.fromFileUrl(
+          new URL("../../../.github/workflows/custom-desktop-nightly.yml", import.meta.url),
+        );
+        const legacyReleasePath = yield* path.fromFileUrl(
+          new URL("../../../.github/workflows/release.yml", import.meta.url),
+        );
+        const legacyRelayDeployPath = yield* path.fromFileUrl(
+          new URL("../../../.github/workflows/deploy-relay.yml", import.meta.url),
+        );
+        const workflow = yield* fileSystem.readFileString(nightlyWorkflowPath);
 
-      expect(workflow).not.toContain("client_tracing_token:");
-      expect(workflow).not.toContain("needs.relay_public_config.outputs.client_tracing_token");
-      expect(workflow).toContain('--github-env-file "$RUNNER_TEMP/relay-client-tracing.env"');
-      expect(workflow).toContain("name: relay-client-tracing-config");
-      expect(workflow).toContain('cat "$config_path" >> "$GITHUB_ENV"');
-    }).pipe(Effect.provide(NodeServices.layer)),
+        expect(yield* fileSystem.exists(legacyReleasePath)).toBe(false);
+        expect(yield* fileSystem.exists(legacyRelayDeployPath)).toBe(false);
+        expect(workflow).toContain("T3CODE_DESKTOP_UPDATE_REPOSITORY: ${{ github.repository }}");
+        expect(workflow).toContain("repository: ${{ github.repository }}");
+        expect(workflow).toContain("*.exe.blockmap");
+        expect(workflow).not.toContain("T3CODE_RELAY_CLIENT_OTLP");
+        expect(workflow).not.toContain("relay_public_config");
+        expect(workflow).not.toContain("npm publish");
+      }).pipe(Effect.provide(NodeServices.layer)),
   );
 });
 

@@ -1,0 +1,72 @@
+name: Sync upstream T3 Code
+
+on:
+  schedule:
+    - cron: "43 8 * * 1-5"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: upstream-sync-main
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+      - id: merge
+        name: Merge upstream main into a review branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/pingdotgg/t3code.git
+          git fetch upstream main --tags
+          if git fetch origin automation/upstream-main:refs/remotes/origin/automation/upstream-main 2>/dev/null; then
+            git checkout -B automation/upstream-main origin/automation/upstream-main
+            before_sha="$(git rev-parse HEAD)"
+            if ! git merge --no-ff --no-edit origin/main; then
+              git merge --abort || true
+              echo "The existing sync branch conflicts with main. No branch update or pull request was created." >&2
+              exit 1
+            fi
+          else
+            git checkout -B automation/upstream-main origin/main
+            before_sha="$(git rev-parse HEAD)"
+          fi
+          if git merge --no-ff --no-edit upstream/main; then
+            if git diff --quiet origin/main HEAD; then echo "has_changes=false" >> "$GITHUB_OUTPUT"; else echo "has_changes=true" >> "$GITHUB_OUTPUT"; fi
+            if [[ "$(git rev-parse HEAD)" == "$before_sha" ]]; then echo "updated=false" >> "$GITHUB_OUTPUT"; else echo "updated=true" >> "$GITHUB_OUTPUT"; fi
+          else
+            git merge --abort || true
+            echo "Upstream merge conflicted. No branch or pull request was created." >&2
+            exit 1
+          fi
+      - name: Push review branch
+        if: steps.merge.outputs.updated == 'true'
+        run: git push origin HEAD:automation/upstream-main
+      - name: Open an upstream sync pull request
+        if: steps.merge.outputs.has_changes == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          if [[ -z "$(gh pr list --base main --head automation/upstream-main --state open --json number --jq '.[0].number')" ]]; then
+            gh pr create --base main --head automation/upstream-main --title "chore: sync upstream main" --body "This PR merges pingdotgg/t3code main into the Jev fork without resetting fork changes.\n\nIt is intentionally not auto-merged. Merge only after this repository's CI is green and the diff is reviewed."
+          fi
+      - name: Dispatch CI for the review branch
+        if: steps.merge.outputs.updated == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run ci.yml --ref automation/upstream-main
