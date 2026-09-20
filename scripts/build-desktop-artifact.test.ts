@@ -426,15 +426,17 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       );
 
       const win = config.win as Record<string, unknown>;
+      const nsis = config.nsis as Record<string, unknown>;
       assert.equal(config.productName, "T3 Code Personal (Alpha)");
       assert.equal(config.artifactName, "T3-Code-Personal-${version}-${arch}.${ext}");
+      assert.equal(nsis.perMachine, false);
       assert.equal(win.icon, "icon.ico");
       assert.equal(win.signAndEditExecutable, true);
       assert.notProperty(win, "azureSignOptions");
     }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
   );
 
-  it.effect("uses the generated Linux desktop entry class", () =>
+  it.effect("uses distinct Personal Linux launcher metadata", () =>
     Effect.gen(function* () {
       const config = yield* createBuildConfig(
         "linux",
@@ -450,7 +452,8 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       const desktop = linux.desktop as { readonly entry: Record<string, unknown> };
       assert.equal(config.productName, "T3 Code Personal (Nightly)");
       assert.equal(config.artifactName, "T3-Code-Personal-${version}-${arch}.${ext}");
-      assert.equal(desktop.entry.StartupWMClass, "t3code");
+      assert.equal(linux.executableName, "t3code-personal");
+      assert.equal(desktop.entry.StartupWMClass, "t3code-personal");
     }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
   );
 

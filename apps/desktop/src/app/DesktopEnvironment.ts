@@ -199,8 +199,10 @@ const make = Effect.fn("desktop.environment.make")(function* (
     appUserModelId: Option.getOrElse(config.appUserModelIdOverride, () =>
       isDevelopment ? "com.ericsensemedo.t3codejev.dev" : "com.ericsensemedo.t3codejev",
     ),
-    linuxDesktopEntryName: isDevelopment ? "t3code-dev.desktop" : "t3code.desktop",
-    linuxWmClass: isDevelopment ? "t3code-dev" : "t3code",
+    linuxDesktopEntryName: isDevelopment
+      ? "t3code-personal-dev.desktop"
+      : "t3code-personal.desktop",
+    linuxWmClass: isDevelopment ? "t3code-personal-dev" : "t3code-personal",
     userDataDirName,
     legacyUserDataDirName,
     defaultDesktopSettings: DesktopAppSettings.resolveDefaultDesktopSettings(input.appVersion),

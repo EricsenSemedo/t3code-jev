@@ -15,6 +15,11 @@ checks this fork's releases. Windows also receives the Linux `node-pty` prebuild
 bundled WSL backend. Builds are unsigned unless a future, separate signing decision adds signing
 configuration.
 
+The Windows NSIS installer remains per-user and does not require elevation. It carries a small
+`app-builder-lib@26.8.1` patch that backports the upstream Windows 8+ guard for the legacy
+`System.dll` Win7 compatibility call. This avoids a known installer crash on current Windows while
+retaining the compatibility path for Windows 7.
+
 Enable Actions and grant the workflow `contents: write` only when ready to publish. Do not run a
 manual dispatch or create a release until that review is complete. The workflow intentionally
 does not publish npm packages, deploy a relay, or deploy a hosted web app.

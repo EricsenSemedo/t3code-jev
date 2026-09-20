@@ -2,6 +2,7 @@ import type { EnvironmentId, TaskRouteSuggestion } from "@t3tools/contracts";
 import { useId, useRef, useState } from "react";
 import { FlaskConicalIcon, LoaderCircleIcon } from "lucide-react";
 import { serverEnvironment } from "../../state/server";
+import { usePrimaryEnvironmentId } from "../../state/environments";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { Button } from "../ui/button";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
@@ -220,12 +221,15 @@ export function JevTrial({
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
+  // Recommendations use this client's Jev-enabled backend, including while viewing
+  // an existing remote environment that does not expose the experimental RPC.
+  const recommendationEnvironmentId = usePrimaryEnvironmentId() ?? environmentId;
   const recommend = useAtomCommand(serverEnvironment.suggestTaskRoute, {
     reportFailure: false,
     reportDefect: false,
   });
   async function suggest(task: string): Promise<TaskRouteSuggestion> {
-    const result = await recommend({ environmentId, input: { task } });
+    const result = await recommend({ environmentId: recommendationEnvironmentId, input: { task } });
     return result._tag === "Success" ? result.value : { status: "unavailable" };
   }
   return (

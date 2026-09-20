@@ -1408,12 +1408,12 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   if (platform === "linux") {
     buildConfig.linux = {
       target: [target],
-      executableName: "t3code",
+      executableName: "t3code-personal",
       icon: "icons",
       category: "Development",
       desktop: {
         entry: {
-          StartupWMClass: "t3code",
+          StartupWMClass: "t3code-personal",
         },
       },
     };
@@ -1421,6 +1421,12 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
 
   if (platform === "win") {
     buildConfig.npmRebuild = false;
+    // Keep the installer scoped to the current user. The app-builder-lib patch
+    // in pnpm-workspace.yaml backports the Windows 8+ guard that removes the
+    // fragile NSIS System.dll call from this path while retaining Win7 support.
+    buildConfig.nsis = {
+      perMachine: false,
+    };
     const winConfig: Record<string, unknown> = {
       target: [target],
       icon: "icon.ico",
