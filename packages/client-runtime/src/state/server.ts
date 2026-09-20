@@ -190,5 +190,13 @@ export function createServerEnvironmentAtoms<R, E>(
       label: "environment-data:server:signal-process",
       tag: WS_METHODS.serverSignalProcess,
     }),
+    suggestTaskRoute: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:suggest-task-route",
+      tag: WS_METHODS.serverSuggestTaskRoute,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId }) => environmentId,
+      },
+    }),
   };
 }

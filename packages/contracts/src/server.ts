@@ -21,6 +21,48 @@ import { ModelCapabilities } from "./model.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 import { ServerSettings } from "./settings.ts";
 
+export const TaskRouteSuggestionInput = Schema.Struct({
+  task: TrimmedNonEmptyString.check(Schema.isMaxLength(4_000)),
+});
+export type TaskRouteSuggestionInput = typeof TaskRouteSuggestionInput.Type;
+
+export const TaskRouteSuggestionLane = Schema.Literals(["code", "luna", "terra", "astra"]);
+export type TaskRouteSuggestionLane = typeof TaskRouteSuggestionLane.Type;
+
+export const TaskRouteSuggestionReason = Schema.Literals([
+  "deterministic",
+  "transformation",
+  "implementation",
+  "complex",
+]);
+export type TaskRouteSuggestionReason = typeof TaskRouteSuggestionReason.Type;
+
+const TaskRouteSuggestionReady = Schema.Struct({
+  status: Schema.Literal("ready"),
+  lane: TaskRouteSuggestionLane,
+  reason: TaskRouteSuggestionReason,
+  confidence: Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 1 })),
+  inputTokens: Schema.NullOr(NonNegativeInt),
+});
+
+const TaskRouteSuggestionNotConfigured = Schema.Struct({
+  status: Schema.Literal("not_configured"),
+});
+const TaskRouteSuggestionUnavailable = Schema.Struct({ status: Schema.Literal("unavailable") });
+const TaskRouteSuggestionBlocked = Schema.Struct({
+  status: Schema.Literal("blocked"),
+  reason: Schema.Literals(["sensitive_input", "continuation"]),
+});
+
+/** A suggestion only; it does not change the selected provider or model. */
+export const TaskRouteSuggestion = Schema.Union([
+  TaskRouteSuggestionReady,
+  TaskRouteSuggestionNotConfigured,
+  TaskRouteSuggestionUnavailable,
+  TaskRouteSuggestionBlocked,
+]);
+export type TaskRouteSuggestion = typeof TaskRouteSuggestion.Type;
+
 const KeybindingsMalformedConfigIssue = Schema.Struct({
   kind: Schema.Literal("keybindings.malformed-config"),
   message: TrimmedNonEmptyString,

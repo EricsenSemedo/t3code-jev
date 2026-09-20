@@ -1,9 +1,10 @@
 import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vite-plus/test";
 
-import { ServerProvider } from "./server.ts";
+import { ServerProvider, TaskRouteSuggestionInput } from "./server.ts";
 
 const decodeServerProvider = Schema.decodeUnknownSync(ServerProvider);
+const decodeTaskRouteSuggestionInput = Schema.decodeUnknownSync(TaskRouteSuggestionInput);
 
 describe("ServerProvider", () => {
   it("defaults capability arrays when decoding provider snapshots", () => {
@@ -70,5 +71,18 @@ describe("ServerProvider", () => {
     });
 
     expect(parsed.continuation?.groupKey).toBe("codex:home:/Users/julius/.codex");
+  });
+});
+
+describe("TaskRouteSuggestionInput", () => {
+  it("trims bounded task input", () => {
+    expect(decodeTaskRouteSuggestionInput({ task: "  Plan a task  " })).toEqual({
+      task: "Plan a task",
+    });
+  });
+
+  it("rejects empty and oversized task input", () => {
+    expect(() => decodeTaskRouteSuggestionInput({ task: "   " })).toThrow();
+    expect(() => decodeTaskRouteSuggestionInput({ task: "a".repeat(4_001) })).toThrow();
   });
 });

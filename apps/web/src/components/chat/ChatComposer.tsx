@@ -68,6 +68,7 @@ import {
 } from "../composerFooterLayout";
 import { type ComposerPromptEditorHandle, ComposerPromptEditor } from "../ComposerPromptEditor";
 import { ProviderModelPicker } from "./ProviderModelPicker";
+import { JevTrial } from "./JevTrial";
 import { type ComposerCommandItem, ComposerCommandMenu } from "./ComposerCommandMenu";
 import { ComposerPendingApprovalActions } from "./ComposerPendingApprovalActions";
 import { CompactComposerControlsMenu } from "./CompactComposerControlsMenu";
@@ -881,8 +882,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const [isComposerPrimaryActionsCompact, setIsComposerPrimaryActionsCompact] = useState(false);
   const [isComposerModelPickerOpen, setIsComposerModelPickerOpen] = useState(false);
   const [isComposerFocused, setIsComposerFocused] = useState(false);
+  const [isJevTrialOpen, setIsJevTrialOpen] = useState(false);
   const isMobileViewport = useMediaQuery("max-sm");
-  const isComposerCollapsedMobile = isMobileViewport && !isComposerFocused;
+  const isComposerCollapsedMobile = isMobileViewport && !isComposerFocused && !isJevTrialOpen;
 
   // ------------------------------------------------------------------
   // Refs
@@ -2492,6 +2494,18 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   getModelDisabledReason={getModelDisabledReason}
                   onInstanceModelChange={onProviderModelSelect}
                 />
+
+                {pendingUserInputs.length === 0 ? (
+                  <JevTrial
+                    key={`${environmentId}:${draftId}`}
+                    environmentId={environmentId}
+                    draft={prompt}
+                    selectedModel={selectedModel}
+                    open={isJevTrialOpen}
+                    onOpenChange={setIsJevTrialOpen}
+                    disabled={isConnecting || environmentUnavailable !== null}
+                  />
+                ) : null}
 
                 {isComposerFooterCompact ? (
                   <CompactComposerControlsMenu
