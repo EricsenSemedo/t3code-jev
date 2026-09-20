@@ -16,8 +16,9 @@ Verified interactions:
 - Saved **Good fit**: browser storage held only time, lane, confidence, selected
   family and rating; no description text.
 - Reopened and used the trial at phone dimensions, with no horizontal overflow.
-- Edited the description again and requested `continue`: locally blocked with
-  continuation guidance. No new task was submitted to a coding agent.
+- Edited the description again and requested `continue`: the server blocked it before
+  any TypeSafe request and returned continuation guidance. No new task was
+  submitted to a coding agent.
 
 The checks found and fixed mobile composer focus loss and the textarea's
 changing accessible label. The in-app browser connector was unavailable, so
@@ -26,6 +27,5 @@ No existing private browser profile or application form was opened.
 
 Limits: phone viewport simulation is not physical phone testing. Windows
 installation, nightly release delivery and real task savings are not verified
-by these screenshots. The existing full-suite macOS packaging failures expect
-the upstream application ID instead of this fork's custom application ID;
-those packaging files are unchanged by this trial.
+by these screenshots. Packaging assertions were subsequently updated for the
+fork's own application ID, and the full local test suite passed.

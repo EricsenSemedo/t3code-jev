@@ -2497,7 +2497,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
 
                 {pendingUserInputs.length === 0 ? (
                   <JevTrial
-                    key={`${environmentId}:${draftId}`}
+                    key={`${environmentId}:${routeKind}:${routeKind === "server" ? activeThreadId : draftId}`}
                     environmentId={environmentId}
                     draft={prompt}
                     selectedModel={selectedModel}
