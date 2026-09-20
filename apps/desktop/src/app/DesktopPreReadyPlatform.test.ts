@@ -89,7 +89,8 @@ describe("DesktopPreReadyPlatform", () => {
           desktopName = name;
         });
         writeFileSyncMock.mockImplementation((path: string, contents: string) => {
-          if (path === "/xdg/applications/t3code-personal.desktop") desktopEntry = contents;
+          if (path === "/xdg/applications/com.ericsensemedo.T3CodePersonal.desktop")
+            desktopEntry = contents;
         });
 
         return Effect.scoped(
@@ -101,7 +102,7 @@ describe("DesktopPreReadyPlatform", () => {
               ),
             );
             const identity = yield* Effect.promise(() => portalIdentity);
-            assert.equal(identity.desktopName, "t3code-personal.desktop");
+            assert.equal(identity.desktopName, "com.ericsensemedo.T3CodePersonal.desktop");
             assert.include(identity.desktopEntry ?? "", 'Exec="/Applications/current.AppImage" %U');
             assert.include(identity.desktopEntry ?? "", "Name=T3 Code Personal (Alpha)");
             assert.include(identity.desktopEntry ?? "", "MimeType=x-scheme-handler/t3code;");
