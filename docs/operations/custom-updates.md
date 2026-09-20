@@ -1,10 +1,10 @@
-# Jev desktop updates and upstream sync
+# Personal desktop updates and upstream sync
 
-The Jev fork publishes its own Linux and Windows desktop updates. It does not deploy the
+This fork publishes its own Linux and Windows desktop updates for T3 Code Personal. It does not deploy the
 upstream relay, hosted web app, or npm package.
 
 `custom-desktop-nightly.yml` runs daily and only from `main`. It first skips when `main` is
-already the commit behind the latest Jev nightly tag. For a new commit it resolves one nightly
+already the commit behind the latest Personal nightly tag. For a new commit it resolves one nightly
 version, builds the Linux x64 AppImage and Windows x64 NSIS installer from that exact commit, and
 publishes one prerelease in `${{ github.repository }}`. The release is created only after both
 platform builds succeed and contains the AppImage with `nightly-linux.yml`, plus the Windows

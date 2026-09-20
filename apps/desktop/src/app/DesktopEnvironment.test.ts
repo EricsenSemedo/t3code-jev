@@ -65,7 +65,7 @@ describe("DesktopEnvironment", () => {
       assert.equal(environment.backendEntryPath, "/repo/apps/server/dist/bin.mjs");
       assert.equal(environment.backendCwd, "/repo");
       assert.equal(environment.appUserModelId, "com.ericsensemedo.t3codejev.dev");
-      assert.equal(environment.linuxWmClass, "t3code-jev-dev");
+      assert.equal(environment.linuxWmClass, "t3-code-personal-dev");
       assert.deepEqual(
         Option.map(environment.devServerUrl, (url) => url.href),
         Option.some("http://localhost:5173/"),

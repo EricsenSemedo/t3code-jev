@@ -1,4 +1,4 @@
-name: Jev desktop nightly
+name: Personal desktop nightly
 
 on:
   schedule:
@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: jev-desktop-nightly
+  group: personal-desktop-nightly
   cancel-in-progress: false
 
 jobs:

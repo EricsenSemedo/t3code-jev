@@ -1332,8 +1332,8 @@ export function resolveMockUpdateServerUrl(mockUpdateServerPort: number | undefi
 
 export function resolveDesktopProductName(version: string): string {
   return resolveDesktopUpdateChannel(version) === "nightly"
-    ? "T3 Code Jev (Nightly)"
-    : (desktopPackageJson.productName ?? "T3 Code Jev");
+    ? "T3 Code Personal (Nightly)"
+    : (desktopPackageJson.productName ?? "T3 Code Personal");
 }
 
 export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
@@ -1353,7 +1353,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   const buildConfig: Record<string, unknown> = {
     appId: DESKTOP_APP_ID,
     productName: resolveDesktopProductName(version),
-    artifactName: "T3-Code-Jev-${version}-${arch}.${ext}",
+    artifactName: "T3-Code-Personal-${version}-${arch}.${ext}",
     directories: {
       buildResources: "apps/desktop/resources",
     },

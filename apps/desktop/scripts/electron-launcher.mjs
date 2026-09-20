@@ -1,4 +1,4 @@
-// This file mostly exists because we want dev mode to say "T3 Code Custom (Dev)" instead of "electron"
+// This file mostly exists because we want dev mode to say "T3 Code Personal (Dev)" instead of "electron"
 
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
@@ -15,7 +15,9 @@ const repoRoot = NodePath.resolve(desktopDir, "..", "..");
 const devBundleIdSuffix = NodePath.basename(repoRoot)
   .toLowerCase()
   .replaceAll(/[^a-z0-9]+/g, "");
-export const APP_DISPLAY_NAME = isDevelopment ? "T3 Code Custom (Dev)" : "T3 Code Custom (Alpha)";
+export const APP_DISPLAY_NAME = isDevelopment
+  ? "T3 Code Personal (Dev)"
+  : "T3 Code Personal (Alpha)";
 export const APP_BUNDLE_ID = isDevelopment
   ? `com.ericsensemedo.t3codecustom.dev.${devBundleIdSuffix || "local"}`
   : "com.ericsensemedo.t3codecustom";
