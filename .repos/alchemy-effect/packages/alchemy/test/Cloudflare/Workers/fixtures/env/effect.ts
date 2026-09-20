@@ -1,4 +1,5 @@
 import * as Cloudflare from "alchemy/Cloudflare";
+import * as Output from "alchemy/Output";
 import * as Config from "effect/Config";
 import * as Effect from "effect/Effect";
 import * as Redacted from "effect/Redacted";
@@ -28,6 +29,7 @@ export default class EnvEffectWorker extends Cloudflare.Worker<EnvEffectWorker>(
       NULL: null,
       OBJ: { nested: { value: "ok" }, count: 7 },
       ARR: [1, 2, 3],
+      OUTPUT_STR: Output.literal("output-str"),
       SECRET_STR: Redacted.make("shh"),
       SECRET_JSON: Redacted.make({ token: "abc", scopes: ["read", "write"] }),
       // Config declared statically on `env` — Alchemy resolves at deploy
@@ -41,6 +43,10 @@ export default class EnvEffectWorker extends Cloudflare.Worker<EnvEffectWorker>(
     const configStr = yield* Config.string("CONFIG_STR");
     const configNum = yield* Config.number("CONFIG_NUM");
     const configRedactedInit = yield* Config.redacted("CONFIG_REDACTED_INIT");
+
+    // Yieldable binding form — attaches the `version_metadata` binding to
+    // this Worker and returns a deferred accessor resolved at runtime.
+    const versionMetadata = yield* Cloudflare.VersionMetadata();
 
     return {
       fetch: Effect.gen(function* () {
@@ -56,12 +62,18 @@ export default class EnvEffectWorker extends Cloudflare.Worker<EnvEffectWorker>(
             NULL: env.NULL,
             OBJ: env.OBJ,
             ARR: env.ARR,
+            OUTPUT_STR: env.OUTPUT_STR,
             SECRET_STR: env.SECRET_STR,
             SECRET_JSON:
               typeof env.SECRET_JSON === "string"
                 ? JSON.parse(env.SECRET_JSON)
                 : env.SECRET_JSON,
           });
+        }
+
+        if (pathname === "/version") {
+          const { id, tag, timestamp } = yield* versionMetadata;
+          return yield* HttpServerResponse.json({ id, tag, timestamp });
         }
 
         if (pathname === "/config") {
@@ -78,5 +90,5 @@ export default class EnvEffectWorker extends Cloudflare.Worker<EnvEffectWorker>(
         return HttpServerResponse.text("ok");
       }),
     };
-  }),
+  }).pipe(Effect.provide(Cloudflare.VersionMetadataBindingLive)),
 ) {}

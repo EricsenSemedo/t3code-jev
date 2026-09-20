@@ -8,6 +8,7 @@ import * as Schedule from "effect/Schedule";
 import { CredentialsStoreLive } from "../Auth/Credentials.ts";
 import { ProfileLive } from "../Auth/Profile.ts";
 import { Command } from "../Build/Command.ts";
+import { DevServer, DevServerProvider } from "../Build/DevServer.ts";
 import * as Build from "../Build/index.ts";
 import { KeyPair, KeyPairProvider } from "../KeyPair.ts";
 import * as Provider from "../Provider.ts";
@@ -31,6 +32,7 @@ import * as KV from "./KV/index.ts";
 import * as Queue from "./Queue/index.ts";
 import * as R2 from "./R2/index.ts";
 import * as RateLimit from "./RateLimit/index.ts";
+import * as Ruleset from "./Ruleset/index.ts";
 import * as SecretsStore from "./SecretsStore/index.ts";
 import * as Tunnel from "./Tunnel/index.ts";
 import * as Vectorize from "./Vectorize/index.ts";
@@ -66,6 +68,7 @@ export const providers = () =>
       Containers.Container,
       D1.D1ConnectionPolicy,
       D1.D1Database,
+      DevServer,
       Dns.DnsReadPolicy,
       Dns.DnsReadWritePolicy,
       Dns.DnsWritePolicy,
@@ -85,6 +88,7 @@ export const providers = () =>
       R2.R2Bucket,
       R2.R2BucketBindingPolicy,
       RateLimit.RateLimitBindingPolicy,
+      Ruleset.Ruleset,
       SecretsStore.SecretBindingPolicy,
       SecretsStore.SecretsStore,
       SecretsStore.Secret,
@@ -101,6 +105,7 @@ export const providers = () =>
       Workers.BindWorkerPolicy,
       Workers.CronEventSourcePolicy,
       Workers.FetchPolicy,
+      Workers.VersionMetadataBindingPolicy,
       Workers.Worker,
       Workflows.WorkflowResource,
       Zaraz.ZarazConfig,
@@ -119,6 +124,7 @@ export const providers = () =>
         Containers.ContainerProvider(),
         D1.D1ConnectionPolicyLive,
         D1.DatabaseProvider(),
+        DevServerProvider(),
         Dns.DnsReadPolicyLive,
         Dns.DnsReadWritePolicyLive,
         Dns.DnsWritePolicyLive,
@@ -138,6 +144,7 @@ export const providers = () =>
         R2.R2BucketBindingPolicyLive,
         R2.R2BucketProvider(),
         RateLimit.RateLimitBindingPolicyLive,
+        Ruleset.RulesetProvider(),
         SecretsStore.SecretBindingPolicyLive,
         SecretsStore.SecretsStoreProvider(),
         SecretsStore.StoreSecretProvider(),
@@ -152,6 +159,7 @@ export const providers = () =>
         Workers.BindWorkerPolicyLive,
         Workers.CronEventSourcePolicyLive,
         Workers.FetchPolicyLive,
+        Workers.VersionMetadataBindingPolicyLive,
         Workers.WorkerProvider(),
         Workflows.WorkflowProvider(),
         Zaraz.ZarazConfigProvider(),

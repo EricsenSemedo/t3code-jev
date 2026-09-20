@@ -197,6 +197,11 @@ export default defineConfig({
           label: "GitHub",
           href: "https://github.com/alchemy-run/alchemy-effect",
         },
+        {
+          icon: "discord",
+          label: "Discord",
+          href: "https://discord.gg/jwKw8dBJdN",
+        },
       ],
       editLink: {
         baseUrl:
@@ -238,7 +243,10 @@ export default defineConfig({
           autogenerate: { directory: "providers", collapsed: true },
         },
       ],
-      plugins: [starlightBlog()],
+      // starlight-blog feeds this many posts into the sidebar's "Recent"
+      // group, which `src/blog-sidebar.ts` re-buckets into Releases/Posts.
+      // We want every post listed, so set it effectively unlimited.
+      plugins: [starlightBlog({ recentPostCount: Number.MAX_SAFE_INTEGER })],
       routeMiddleware: ["./src/blog-sidebar.ts"],
     }),
     mdx(),

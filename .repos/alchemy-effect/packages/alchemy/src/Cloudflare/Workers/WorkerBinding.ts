@@ -18,10 +18,12 @@ import type { KVNamespace } from "../KV/KVNamespace.ts";
 import type { Queue } from "../Queue/Queue.ts";
 import type { R2Bucket } from "../R2/R2Bucket.ts";
 import type { RateLimit } from "../RateLimit/RateLimit.ts";
+import type { Secret } from "../SecretsStore/Secret.ts";
 import type { VectorizeIndex } from "../Vectorize/VectorizeIndex.ts";
 import type { Assets } from "./Assets.ts";
 import type { DurableObjectNamespaceLike } from "./DurableObjectNamespace.ts";
 import type { DynamicWorkerLoader } from "./DynamicWorkerLoader.ts";
+import type { VersionMetadata } from "./VersionMetadata.ts";
 import { makeRpcStub } from "./Rpc.ts";
 import { isWorker, Worker, WorkerEnvironment } from "./Worker.ts";
 
@@ -55,8 +57,10 @@ export type WorkerBindingResource =
   | Images
   | Hyperdrive
   | VectorizeIndex
+  | Secret
   | Worker
   | DynamicWorkerLoader
+  | VersionMetadata
   | DurableObjectNamespaceLike<any>;
 
 export type WorkerBindings = {

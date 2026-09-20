@@ -29,3 +29,13 @@ workflow token do not automatically start PR workflows, it dispatches the fork's
 that review branch. A merge conflict aborts the run without creating a branch or pull request.
 The workflow never resets `main` and never auto-merges: the dispatched CI and a review must pass
 before merging the sync PR.
+
+## Alchemy reference snapshot
+
+The relay uses published `alchemy@2.0.0-beta.52`. Its read-only reference snapshot under
+`.repos/alchemy-effect` was refreshed from tag `v2.0.0-beta.52`, resolved to commit
+`62389cc7d4cd5710fd876061e51b3fb64fad077d`. The legacy reference import has no Git subtree
+metadata, so `vp run sync:repos --repo alchemy-effect` cannot pull it. Until that history is
+migrated separately, refresh this reference by cloning the exact configured tag, verifying the
+resolved commit, and replacing only the reference directory with that source snapshot. Do not
+copy its `.git` directory or import it into application code.

@@ -2,13 +2,12 @@ import * as ConfigError from "effect/Config";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
-import { pipe } from "effect/Function";
+import * as Effectable from "effect/Effectable";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
 import type { Scope } from "effect/Scope";
 import type { HttpClient } from "effect/unstable/http/HttpClient";
-import { SingleShotGen } from "effect/Utils";
 import type { PolicyLike } from "./Binding.ts";
 import type { Dependencies } from "./Dependencies.ts";
 import type { ExecutionContext } from "./ExecutionContext.ts";
@@ -76,7 +75,11 @@ export interface Platform<
       id: string,
       props:
         | InputProps<Resource["Props"]>
-        | Effect.Effect<InputProps<Resource["Props"]>, never, PropsReq>,
+        | Effect.Effect<
+            InputProps<Resource["Props"]>,
+            ConfigError.ConfigError,
+            PropsReq
+          >,
     ): Effect.Effect<
       Resource & Rpc<Self> & Dependencies<Deps>,
       never,
@@ -103,7 +106,7 @@ export interface Platform<
       id: string,
       props:
         | InputProps<Resource["Props"]>
-        | Effect.Effect<Resource["Props"], never, PropsReq>,
+        | Effect.Effect<Resource["Props"], ConfigError.ConfigError, PropsReq>,
       impl: Effect.Effect<Shape, ConfigError.ConfigError, InitReq>,
     ): Effect.Effect<
       Resource & Rpc<Self>,
@@ -118,7 +121,11 @@ export interface Platform<
       id: string,
       props:
         | InputProps<Resource["Props"]>
-        | Effect.Effect<InputProps<Resource["Props"]>, never, PropsReq>,
+        | Effect.Effect<
+            InputProps<Resource["Props"]>,
+            ConfigError.ConfigError,
+            PropsReq
+          >,
     ): Effect.Effect<
       Resource & Rpc<Self>,
       never,
@@ -134,7 +141,7 @@ export interface Platform<
       >;
       new (_: never): MakeShape<Shape, BaseShape>;
     } & (<InitReq extends Services | PlatformServices | Resource = never>(
-        impl: Effect.Effect<Shape, never, InitReq>,
+        impl: Effect.Effect<Shape, ConfigError.ConfigError, InitReq>,
       ) => Effect.Effect<
         Resource & Rpc<Self>,
         never,
@@ -217,7 +224,7 @@ export const Platform = <
         constructor(id, props, impl, true);
     } else if (!impl) {
       const cls = makeClass(id, props);
-      const asEffect = () =>
+      const evaluate = () =>
         (!isTag
           ? // this is a non-tagged resource yielded without providing an implementation
             // e.g.
@@ -264,7 +271,7 @@ export const Platform = <
         );
       return Object.assign(
         function (impl: Impl) {
-          return cls.asEffect().pipe(Effect.provide(cls.make(impl)));
+          return cls.Self.pipe(Effect.provide(cls.make(impl)));
         },
         // we splice in the Effect so this can be yielded to indicate a non-Effect native instance
         // e.g. here, we yield it - in this case we don't want to provide an implementation
@@ -272,42 +279,29 @@ export const Platform = <
         //  main: "./src/worker.ts"
         // });
         cls,
-        {
-          asEffect,
-          // @ts-expect-error
-          pipe: (...args: any[]) => asEffect().pipe(...args),
-          [Symbol.iterator]: () => new SingleShotGen(asEffect()),
-        },
+        // Spread the Effect prototype LAST so it overrides the evaluate copied
+        // from `cls`: yielding this no-impl form bridges to the (possibly
+        // non-Effect-native) resource rather than resolving the Self tag.
+        Effectable.Prototype({
+          label: `${type}<${id}>`,
+          evaluate,
+        }),
       );
     } else {
       // impl was provided inline, this is a non-tagged eager instance
       // e.g.
       // export default Cloudflare.Worker("id", { main: "./src/worker.ts" }, Effect.gen(function* () { .. })
       const cls = makeClass(id, props);
-      return cls.asEffect().pipe(Effect.provide(cls.make(impl)), effectClass);
+      return cls.Self.pipe(Effect.provide(cls.make(impl)), effectClass);
     }
   };
 
   const makeClass = (id: string, props: Props) => {
-    return class Platform {
+    class Platform {
       static readonly Self = Self(`${type}<${id}>`);
       static readonly Platform = Context.Service<Platform, Platform>(
         `Platform<${type}<${id}>>`,
       );
-      static [Symbol.iterator](): Iterator<
-        Effect.Effect<void, never, Self>,
-        Resource,
-        void
-      > {
-        return new SingleShotGen(this.asEffect()) as any;
-      }
-      static asEffect() {
-        return this.Self;
-      }
-      static pipe(...args: any[]) {
-        // @ts-expect-error
-        return pipe(this, ...args);
-      }
       static of = (shape: any) => shape;
       static make = (impl: Impl) => {
         // build the Layer once for the root Self
@@ -452,13 +446,31 @@ export const Platform = <
           SelfLayer,
         );
       };
-    };
+    }
+    // Make the platform class itself a real Effect: `yield* MyWorker` resolves
+    // the Self tag. Replaces the hand-rolled asEffect/pipe/[Symbol.iterator].
+    return Object.assign(
+      Platform,
+      Effectable.Prototype({
+        label: `${type}<${id}>`,
+        evaluate: () => Platform.Self,
+      }),
+    );
   };
 
-  const instance = Object.assign(constructor, resource, {
-    Platform: Platform,
-    asEffect: () => resource.Self,
-    ...methods,
-  }) as any;
+  const instance = Object.assign(
+    constructor,
+    resource,
+    // Spread the Effect prototype LAST so it overrides any evaluate inherited
+    // from `resource`; `yield* Cloudflare.Worker` resolves the resource Self.
+    Effectable.Prototype({
+      label: `${type}`,
+      evaluate: () => resource.Self,
+    }),
+    {
+      Platform: Platform,
+      ...methods,
+    },
+  ) as any;
   return instance;
 };
