@@ -1303,6 +1303,11 @@ const ThreadTurnStartBootstrap = Schema.Struct({
 
 export type ThreadTurnStartBootstrap = typeof ThreadTurnStartBootstrap.Type;
 
+/** An opaque server-issued Jev routing record reference; never contains prompt content. */
+const JevRoutingTestMetadata = Schema.Struct({
+  correlationId: TrimmedNonEmptyString.check(Schema.isMaxLength(128)),
+});
+
 export const ThreadTurnStartCommand = Schema.Struct({
   type: Schema.Literal("thread.turn.start"),
   commandId: CommandId,
@@ -1322,6 +1327,7 @@ export const ThreadTurnStartCommand = Schema.Struct({
   ),
   bootstrap: Schema.optional(ThreadTurnStartBootstrap),
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
+  routingTest: Schema.optional(JevRoutingTestMetadata),
   createdAt: IsoDateTime,
 });
 
@@ -1342,6 +1348,7 @@ const ClientThreadTurnStartCommand = Schema.Struct({
   interactionMode: ProviderInteractionMode,
   bootstrap: Schema.optional(ThreadTurnStartBootstrap),
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
+  routingTest: Schema.optional(JevRoutingTestMetadata),
   createdAt: IsoDateTime,
 });
 

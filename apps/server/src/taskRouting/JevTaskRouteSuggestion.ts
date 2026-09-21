@@ -15,6 +15,8 @@ import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 
+import type { JevRoutingTestRecords } from "./JevRoutingTestRecords.ts";
+
 const JEV_ENDPOINT = "https://api.typesafe.ai/v1/systemone";
 const JEV_MODEL = "jev-1.13.0";
 const REQUEST_TIMEOUT_MS = 3_000;
@@ -96,6 +98,7 @@ export interface JevTaskRouteSuggestionDependencies {
   readonly configPath?: string;
   readonly fetch?: (input: string, init: RequestInit) => Promise<JevFetchResponse>;
   readonly now?: () => number;
+  readonly records?: JevRoutingTestRecords;
 }
 
 function sensitiveText(text: string): boolean {
@@ -166,7 +169,10 @@ const assessmentCriteria = {
 } as const;
 
 export interface JevTaskRouteSuggestionService {
-  readonly suggest: (input: TaskRouteSuggestionRequest) => Effect.Effect<TaskRouteSuggestionResult>;
+  readonly suggest: (
+    input: TaskRouteSuggestionRequest,
+    sessionId?: string,
+  ) => Effect.Effect<TaskRouteSuggestionResult>;
 }
 
 export const make = Effect.fn("JevTaskRouteSuggestion.make")(function* (
@@ -182,6 +188,7 @@ export const make = Effect.fn("JevTaskRouteSuggestion.make")(function* (
   // @effect-diagnostics globalFetch:off
   const send = dependencies.fetch ?? ((input, init) => fetch(input, init));
   const now = dependencies.now ?? Date.now;
+  const records = dependencies.records;
 
   const loadApiKey = Effect.fn("JevTaskRouteSuggestion.loadApiKey")(function* () {
     const fromEnvironment = getEnvironmentVariable("TYPESAFE_API_KEY")?.trim();
@@ -203,7 +210,9 @@ export const make = Effect.fn("JevTaskRouteSuggestion.make")(function* (
 
   const suggest = Effect.fn("JevTaskRouteSuggestion.suggest")(function* (
     requestInput: TaskRouteSuggestionRequest,
+    sessionId?: string,
   ) {
+    const startedAt = now();
     // This service is also called directly in tests and by server integrations,
     // so do not rely on the websocket boundary to keep routing state bounded.
     const decoded = decodeTaskRouteSuggestionInput(requestInput);
@@ -211,6 +220,38 @@ export const make = Effect.fn("JevTaskRouteSuggestion.make")(function* (
     const input = decoded.value;
     const shadow =
       getEnvironmentVariable("T3CODE_JEV_ROUTING_MODE")?.trim().toLowerCase() === "shadow";
+    const correlationId =
+      records && sessionId
+        ? records.begin({
+            sessionId,
+            mode: shadow ? "shadow" : "apply",
+            ...(input.context?.currentLane || input.context?.currentEffort
+              ? {
+                  before: {
+                    ...(input.context.currentLane ? { lane: input.context.currentLane } : {}),
+                    ...(input.context.currentEffort ? { effort: input.context.currentEffort } : {}),
+                  },
+                }
+              : {}),
+          })
+        : undefined;
+    const complete = <Result extends TaskRouteSuggestionResult>(
+      result: Result,
+      apiRequested = false,
+      recordedResult: TaskRouteSuggestionResult = result,
+    ) => {
+      if (correlationId) {
+        records?.finish({
+          correlationId,
+          mode: shadow ? "shadow" : "apply",
+          result: recordedResult,
+          latencyMs: now() - startedAt,
+          apiRequested,
+        });
+        return { ...result, correlationId } as Result & { readonly correlationId: string };
+      }
+      return result;
+    };
 
     const isContextual = input.context !== undefined;
     const blocked = isContextual
@@ -218,34 +259,36 @@ export const make = Effect.fn("JevTaskRouteSuggestion.make")(function* (
         ? "sensitive_input"
         : undefined
       : sensitiveInputReason(input.task);
-    if (blocked !== undefined) return { status: "blocked", reason: blocked } as const;
+    if (blocked !== undefined) return complete({ status: "blocked", reason: blocked } as const);
     if (
       input.context?.recentMessages.length === 0 &&
       sensitiveInputReason(input.task) === "continuation"
     ) {
-      return { status: "blocked", reason: "continuation" } as const;
+      return complete({ status: "blocked", reason: "continuation" } as const);
     }
 
     const lanes = [
       ...new Set(input.availableLanes ?? ["luna", "terra", "sol", "astra"]),
     ] as TaskRouteModelLane[];
-    if (lanes.length < 2) return { status: "unavailable" } as const;
+    if (lanes.length < 2) return complete({ status: "unavailable" } as const);
     const criteria = Object.fromEntries(lanes.map((lane) => [lane, laneCriteria[lane]]));
 
     const apiKey = yield* loadApiKey();
-    if (Option.isNone(apiKey)) return { status: "not_configured" } as const;
+    if (Option.isNone(apiKey)) return complete({ status: "not_configured" } as const);
 
     const request = Effect.gen(function* () {
+      let apiRequested = false;
       const allowed = yield* Ref.modify(lastRequestedAt, (previous) => {
         const requestedAt = now();
         return previous === null || requestedAt - previous >= MIN_REQUEST_INTERVAL_MS
           ? ([true, requestedAt] as const)
           : ([false, previous] as const);
       });
-      if (!allowed) return { status: "unavailable" } as const;
+      if (!allowed) return complete({ status: "unavailable" } as const);
 
       const response = yield* Effect.tryPromise({
-        try: () =>
+        try: () => (
+          (apiRequested = true),
           send(JEV_ENDPOINT, {
             method: "POST",
             redirect: "error",
@@ -293,23 +336,25 @@ export const make = Effect.fn("JevTaskRouteSuggestion.make")(function* (
                     },
                   },
             }),
-          }),
+          })
+        ),
         catch: () => undefined,
       }).pipe(Effect.option);
-      if (Option.isNone(response) || !response.value.ok) return { status: "unavailable" } as const;
+      if (Option.isNone(response) || !response.value.ok)
+        return complete({ status: "unavailable" } as const, apiRequested);
 
       const body = yield* Effect.tryPromise({
         try: () => response.value.json(),
         catch: () => undefined,
       }).pipe(Effect.option);
-      if (Option.isNone(body)) return { status: "unavailable" } as const;
+      if (Option.isNone(body)) return complete({ status: "unavailable" } as const, apiRequested);
 
       if (isContextual) {
         if (
           !isContextualJevResponse(body.value) ||
           !lanes.includes(body.value.answers.route.choice)
         ) {
-          return { status: "unavailable" } as const;
+          return complete({ status: "unavailable" } as const, apiRequested);
         }
         const inputTokens = body.value.usage.input_tokens;
         const result = {
@@ -337,11 +382,13 @@ export const make = Effect.fn("JevTaskRouteSuggestion.make")(function* (
           escalationProbability: result.escalationProbability,
           inputTokens: result.inputTokens,
         });
-        return shadow ? ({ status: "unavailable" } as const) : result;
+        return shadow
+          ? complete({ status: "unavailable" } as const, apiRequested, result)
+          : complete(result, apiRequested);
       }
 
       if (!isLegacyJevResponse(body.value) || !lanes.includes(body.value.answers.route.choice)) {
-        return { status: "unavailable" } as const;
+        return complete({ status: "unavailable" } as const, apiRequested);
       }
       const inputTokens = body.value.usage.input_tokens;
       const result = {
@@ -358,12 +405,14 @@ export const make = Effect.fn("JevTaskRouteSuggestion.make")(function* (
         mode: shadow ? "shadow" : "apply",
         inputTokens: result.inputTokens,
       });
-      return shadow ? ({ status: "unavailable" } as const) : result;
+      return shadow
+        ? complete({ status: "unavailable" } as const, apiRequested, result)
+        : complete(result, apiRequested);
     });
 
     return yield* semaphore
       .withPermitsIfAvailable(1)(request)
-      .pipe(Effect.map(Option.getOrElse(() => ({ status: "unavailable" }) as const)));
+      .pipe(Effect.map(Option.getOrElse(() => complete({ status: "unavailable" } as const))));
   });
 
   return { suggest } satisfies JevTaskRouteSuggestionService;
