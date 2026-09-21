@@ -3,10 +3,12 @@
 This fork publishes its own Linux and Windows desktop updates for T3 Code Personal. It does not deploy the
 upstream relay, hosted web app, or npm package.
 
-`custom-desktop-nightly.yml` runs daily and only from `main`. It compares `main` with the newest
+`custom-desktop-nightly.yml` runs hourly and after a validated upstream merge, only from `main`.
+It compares `main` with the newest
 published Personal nightly release in this repository; ordinary Git tags, including tags brought in
-by an upstream merge, cannot suppress the first Personal release. It waits at least six hours after
-the last nightly, then resolves one version, builds the Linux x64 AppImage and Windows x64 NSIS
+by an upstream merge, cannot suppress the first Personal release. Unchanged source is skipped;
+new commits do not wait for the upstream project's six-hour release interval. The workflow
+resolves one version using the cross-workflow run ID, builds the Linux x64 AppImage and Windows x64 NSIS
 installer from that exact commit, and publishes one prerelease in `${{ github.repository }}`. The
 release is created only after both platform builds succeed and contains the AppImage with
 `nightly-linux.yml`, plus the Windows `.exe`, its `.exe.blockmap`, and `nightly.yml`.
@@ -30,13 +32,23 @@ CI also builds both platforms with a run-specific nightly version and uploads `d
 artifacts. Download those artifacts to test an installer before merging; CI does not create a
 GitHub Release.
 
-`upstream-sync.yml` fetches `pingdotgg/t3code` main on weekday mornings, merges it into
-`automation/upstream-main`, and opens or updates a pull request. Because PRs created with the
-workflow token do not automatically start PR workflows, it dispatches the fork's CI workflow for
-that review branch. A merge conflict aborts the run without creating a branch or pull request.
-The workflow never resets or auto-merges `main`: the dispatched CI and a review must pass before
-merging the sync PR. A Personal release is automatic only after an approved commit reaches `main`;
-upstream changes remain review-required so Personal upgrades are preserved.
+`upstream-sync.yml` fetches `pingdotgg/t3code` main hourly without importing upstream release tags,
+merges it into `automation/upstream-main`, and opens a pull request. An open batch stays stable
+while checks and review run; only a newer Personal `main` refreshes its base. The workflow explicitly
+dispatches CI for the proposed revision and retries a missing dispatch on its next run. A merge
+conflict aborts the run for manual resolution; it never resets Personal changes.
+
+`complete-upstream-sync.yml` runs after CI and every 15 minutes. It executes code from trusted `main`
+and automatically merges only when the proposed revision includes current `main`, passes the full
+CI suite and both installer builds, has CodeRabbit approval on that exact revision, and has no
+unresolved review threads, requested changes or unsuccessful checks. Missing reviews are requested
+at most hourly to recover from review rate limits. A merge explicitly dispatches publication;
+the hourly release schedule also recovers from a failed dispatch.
+
+Conflicts, failed tests and review findings require a fix before automation continues. Inspect the
+sync PR and its Actions runs for the waiting reason. GitHub schedules and reviewer capacity can
+delay delivery; hourly checks do not guarantee a new installable build every hour. The desktop
+update button offers the tested Personal build once publication completes.
 
 Keep current upstream dependencies, native helpers, and vendored reference snapshots together
 when syncing. Reapply only the fork-specific UI, routing, speech, identity, and update changes;
