@@ -32,11 +32,13 @@ CI also builds both platforms with a run-specific nightly version and uploads `d
 artifacts. Download those artifacts to test an installer before merging; CI does not create a
 GitHub Release.
 
-`upstream-sync.yml` fetches `pingdotgg/t3code` main hourly without importing upstream release tags,
-merges it into `automation/upstream-main`, and opens a pull request. An open batch stays stable
-while checks and review run; only a newer Personal `main` refreshes its base. The workflow explicitly
-dispatches CI for the proposed revision and retries a missing dispatch on its next run. A merge
-conflict aborts the run for manual resolution; it never resets Personal changes.
+`upstream-sync.yml` fetches `pingdotgg/t3code` main hourly without importing upstream release tags
+and opens a pull request from `automation/upstream-main`. Each batch is the longest contiguous
+first-parent upstream prefix whose merged diff changes at most 100 files, so CodeRabbit can review
+it. An open batch stays stable while checks and review run; only a newer Personal `main` refreshes
+its base. The workflow explicitly dispatches CI for the proposed revision and retries a missing
+dispatch on its next run. A merge conflict or an oversized first upstream commit aborts the run for
+manual resolution; it never resets Personal changes.
 
 `complete-upstream-sync.yml` runs after CI and every 15 minutes. It executes code from trusted `main`
 and automatically merges only when the proposed revision includes current `main`, passes the full
