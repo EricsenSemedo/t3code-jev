@@ -30,9 +30,60 @@ import { ServerSettings } from "./settings.ts";
 export const TaskRouteModelLane = Schema.Literals(["luna", "terra", "sol", "astra"]);
 export type TaskRouteModelLane = typeof TaskRouteModelLane.Type;
 
+export const TaskRouteReasoningEffort = Schema.Literals([
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+  "ultra",
+]);
+export type TaskRouteReasoningEffort = typeof TaskRouteReasoningEffort.Type;
+
+export const TaskRouteAssessment = Schema.Literals([
+  "new_task",
+  "continuation",
+  "retry",
+  "external_blocker",
+]);
+export type TaskRouteAssessment = typeof TaskRouteAssessment.Type;
+
+export const TASK_ROUTE_CONTEXT_LIMITS = {
+  messages: 4,
+  messageChars: 1_000,
+  activities: 4,
+  activityChars: 240,
+} as const;
+
+export const TaskRouteContext = Schema.Struct({
+  currentLane: Schema.optionalKey(TaskRouteModelLane),
+  currentEffort: Schema.optionalKey(TaskRouteReasoningEffort),
+  recentMessages: Schema.Array(
+    Schema.Struct({
+      role: Schema.Literals(["user", "assistant"]),
+      text: TrimmedNonEmptyString.check(Schema.isMaxLength(TASK_ROUTE_CONTEXT_LIMITS.messageChars)),
+    }),
+  ).check(Schema.isMaxLength(TASK_ROUTE_CONTEXT_LIMITS.messages)),
+  recentActivities: Schema.Array(
+    Schema.Struct({
+      tone: Schema.Literals(["info", "tool", "approval", "error"]),
+      summary: TrimmedNonEmptyString.check(
+        Schema.isMaxLength(TASK_ROUTE_CONTEXT_LIMITS.activityChars),
+      ),
+    }),
+  ).check(Schema.isMaxLength(TASK_ROUTE_CONTEXT_LIMITS.activities)),
+  latestTurnState: Schema.optionalKey(
+    Schema.Literals(["running", "interrupted", "completed", "error"]),
+  ),
+  contextTokens: Schema.optionalKey(NonNegativeInt),
+  hasUnseenContext: Schema.Boolean,
+});
+export type TaskRouteContext = typeof TaskRouteContext.Type;
+
 export const TaskRouteSuggestionInput = Schema.Struct({
   task: TrimmedNonEmptyString.check(Schema.isMaxLength(4_000)),
   availableLanes: Schema.optionalKey(Schema.Array(TaskRouteModelLane).check(Schema.isMaxLength(4))),
+  context: Schema.optionalKey(TaskRouteContext),
 });
 export type TaskRouteSuggestionInput = typeof TaskRouteSuggestionInput.Type;
 
@@ -54,6 +105,17 @@ const TaskRouteSuggestionReady = Schema.Struct({
   reason: TaskRouteSuggestionReason,
   confidence: Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 1 })),
   inputTokens: Schema.NullOr(NonNegativeInt),
+  assessment: Schema.optionalKey(TaskRouteAssessment),
+  assessmentConfidence: Schema.optionalKey(
+    Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 1 })),
+  ),
+  effort: Schema.optionalKey(TaskRouteReasoningEffort),
+  effortConfidence: Schema.optionalKey(
+    Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 1 })),
+  ),
+  escalationProbability: Schema.optionalKey(
+    Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 1 })),
+  ),
 });
 
 const TaskRouteSuggestionNotConfigured = Schema.Struct({

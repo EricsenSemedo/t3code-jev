@@ -5080,7 +5080,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           </TooltipTrigger>
           <TooltipPopup>
             {jevAutoSelectAvailable
-              ? "Sends this prompt to TypeSafe; no history or attachments."
+              ? "Chooses model and reasoning using this prompt, recent chat, and activity summaries sent to TypeSafe. Attachments stay excluded."
               : "Auto-select requires at least two supported Codex models."}
           </TooltipPopup>
         </Tooltip>

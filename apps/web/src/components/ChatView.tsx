@@ -364,7 +364,11 @@ import {
 } from "../state/entities";
 import { environmentShell } from "../state/shell";
 import { ChatComposer, type ChatComposerHandle } from "./chat/ChatComposer";
-import { availableJevModelLanes, resolveJevModelSelection } from "./chat/jevAutoSelect";
+import {
+  buildJevRouteContext,
+  buildJevRouteInput,
+  requestJevModelSelection,
+} from "./chat/jevAutoSelect";
 import { createPageScrollController, type PageScrollKey } from "./chat/pageScrollController";
 import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
 import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
@@ -7716,49 +7720,68 @@ export default function ChatView(props: ChatViewProps) {
     );
     let dispatchModelSelection = ctxSelectedModelSelection;
     let dispatchModel = ctxSelectedModel;
-    const availableJevLanes =
-      ctxSelectedProvider === "codex" ? availableJevModelLanes(ctxSelectedProviderModels) : [];
-    if (
-      settings.jevAutoSelectModel &&
-      multipleModelSelections === null &&
-      messageTextForSend.length > 0 &&
-      messageTextForSend.length <= 4_000 &&
-      availableJevLanes.length >= 2
-    ) {
-      // Hold duplicate sends while the opted-in classification runs. The request
-      // contains only the typed text and local model lanes, never attachments or history.
+    const jevRouteInput = buildJevRouteInput({
+      enabled:
+        settings.jevAutoSelectModel &&
+        (!primaryEnvironmentId || primaryEnvironmentId === environmentId),
+      provider: ctxSelectedProvider,
+      running: phase === "running",
+      multipleModels: multipleModelSelections !== null,
+      task: messageTextForSend,
+      models: ctxSelectedProviderModels,
+      context: () =>
+        buildJevRouteContext({
+          selected: ctxSelectedModelSelection,
+          models: ctxSelectedProviderModels,
+          messages: activeThread.messages,
+          activities: threadActivities,
+          latestTurn: activeThread.latestTurn,
+          contextTokens: activeContextWindow?.usedTokens ?? null,
+          hasUnseenContext:
+            composerAttachmentsSnapshot.length > 0 ||
+            composerTerminalContextsSnapshot.length > 0 ||
+            composerPreviewAnnotationsSnapshot.length > 0 ||
+            composerReviewCommentsSnapshot.length > 0,
+        }),
+    });
+    if (jevRouteInput) {
       sendInFlightRef.current = true;
       setIsJevRouting(true);
-      let routeResult: Awaited<ReturnType<typeof suggestTaskRoute>> | null = null;
-      try {
-        routeResult = await suggestTaskRoute({
-          environmentId: primaryEnvironmentId ?? environmentId,
-          input: { task: messageTextForSend, availableLanes: availableJevLanes },
-        });
-      } catch {
-        // The selected model remains the safe fallback when the optional route fails.
-      } finally {
-        setIsJevRouting(false);
-        sendInFlightRef.current = false;
-      }
+      const routedSelection = await requestJevModelSelection({
+        input: jevRouteInput,
+        models: ctxSelectedProviderModels,
+        selected: ctxSelectedModelSelection,
+        suggest: async (input) => {
+          const result = await suggestTaskRoute({
+            environmentId: primaryEnvironmentId ?? environmentId,
+            input,
+          });
+          return result._tag === "Success" ? result.value : { status: "unavailable" };
+        },
+      });
+      setIsJevRouting(false);
+      sendInFlightRef.current = false;
       if (currentRouteThreadKeyRef.current !== routeThreadKey) return;
-      if (routeResult?._tag === "Success") {
-        const routedSelection = resolveJevModelSelection({
-          suggestion: routeResult.value,
-          models: ctxSelectedProviderModels,
-          selected: ctxSelectedModelSelection,
-        });
-        if (routedSelection) {
-          dispatchModelSelection = routedSelection;
-          dispatchModel = routedSelection.model;
-          toastManager.add(
-            stackedThreadToast({
-              type: "info",
-              title: `Jev selected ${routedSelection.model}`,
-              description: "You can change the model at any time.",
-            }),
-          );
-        }
+      // A manual selection during the routing request wins. Keep the draft so
+      // the next Send uses the new model rather than this stale recommendation.
+      const liveSelection = composerRef.current?.getSendContext()?.selectedModelSelection;
+      if (JSON.stringify(liveSelection) !== JSON.stringify(ctxSelectedModelSelection)) return;
+      if (routedSelection) {
+        dispatchModelSelection = routedSelection;
+        dispatchModel = routedSelection.model;
+        const effort = routedSelection.options?.find(
+          (option) => option.id === "reasoningEffort",
+        )?.value;
+        toastManager.add(
+          stackedThreadToast({
+            type: "info",
+            title: `Jev selected ${routedSelection.model}`,
+            description:
+              typeof effort === "string"
+                ? `Reasoning: ${effort}. You can change the model at any time.`
+                : "You can change the model at any time.",
+          }),
+        );
       }
     }
     const outgoingMessageText = formatOutgoingPrompt({
