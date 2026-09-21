@@ -19,6 +19,8 @@ jobs:
     if: github.repository == 'EricsenSemedo/t3code-jev' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    env:
+      GH_REPO: ${{ github.repository }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -32,7 +34,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          open_pr="$(gh pr list --base main --head automation/upstream-main --state open --json number --jq '.[0].number')"
+          open_pr="$(gh pr list --repo "$GITHUB_REPOSITORY" --base main --head automation/upstream-main --state open --json number --jq '.[0].number')"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git remote add upstream https://github.com/pingdotgg/t3code.git
@@ -76,8 +78,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          if [[ -z "$(gh pr list --base main --head automation/upstream-main --state open --json number --jq '.[0].number')" ]]; then
-            gh pr create --base main --head automation/upstream-main --title "chore: sync upstream main" --body "Merges pingdotgg/t3code main while preserving Personal changes. Automatically merges only after the exact revision passes full CI, both installer builds and CodeRabbit approval, with no unresolved review threads. Conflicts or failed checks leave this PR pending. A successful merge triggers a Personal release."
+          if [[ -z "$(gh pr list --repo "$GITHUB_REPOSITORY" --base main --head automation/upstream-main --state open --json number --jq '.[0].number')" ]]; then
+            gh pr create --repo "$GITHUB_REPOSITORY" --base main --head automation/upstream-main --title "chore: sync upstream main" --body "Merges pingdotgg/t3code main while preserving Personal changes. Automatically merges only after the exact revision passes full CI, both installer builds and CodeRabbit approval, with no unresolved review threads. Conflicts or failed checks leave this PR pending. A successful merge triggers a Personal release."
           fi
       - name: Dispatch CI for the review branch
         if: steps.merge.outputs.has_changes == 'true'
@@ -86,5 +88,5 @@ jobs:
         shell: bash
         run: |
           # Recover if a previous sync pushed successfully but its dispatch failed.
-          existing_run="$(gh run list --workflow ci.yml --branch automation/upstream-main --event workflow_dispatch --commit "$(git rev-parse HEAD)" --limit 1 --json databaseId --jq '.[0].databaseId')"
-          if [[ -z "$existing_run" ]]; then gh workflow run ci.yml --ref automation/upstream-main; fi
+          existing_run="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --branch automation/upstream-main --event workflow_dispatch --commit "$(git rev-parse HEAD)" --limit 1 --json databaseId --jq '.[0].databaseId')"
+          if [[ -z "$existing_run" ]]; then gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref automation/upstream-main; fi
