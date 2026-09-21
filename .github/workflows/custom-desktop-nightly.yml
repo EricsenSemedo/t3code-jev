@@ -2,7 +2,7 @@ name: Personal desktop nightly
 
 on:
   schedule:
-    - cron: "17 9 * * *"
+    - cron: "17 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   preflight:
-    if: github.ref == 'refs/heads/main'
+    if: github.repository == 'EricsenSemedo/t3code-jev' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     outputs:
       has_changes: ${{ steps.changes.outputs.has_changes }}
@@ -37,12 +37,13 @@ jobs:
         with:
           script: |
             const { shouldReleaseNightly } = require("./.github/scripts/check-nightly-release.cjs");
-            core.setOutput("has_changes", String(await shouldReleaseNightly({ github, context, core })));
+            core.setOutput("has_changes", String(await shouldReleaseNightly({ github, context, core, minimumReleaseGapMs: 0 })));
       - id: meta
         if: steps.changes.outputs.has_changes == 'true'
         env:
           NIGHTLY_SHA: ${{ github.sha }}
-          NIGHTLY_RUN_NUMBER: ${{ github.run_number }}
+          # Run IDs are monotonic across workflows, including the first release's CI artifacts.
+          NIGHTLY_RUN_NUMBER: ${{ github.run_id }}
         run: node scripts/resolve-nightly-release.ts --date "$(date -u +%Y%m%d)" --run-number "$NIGHTLY_RUN_NUMBER" --sha "$NIGHTLY_SHA" --github-output
 
   verify:

@@ -2,7 +2,7 @@ name: Sync upstream T3 Code
 
 on:
   schedule:
-    - cron: "43 8 * * 1-5"
+    - cron: "43 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   sync:
-    if: github.ref == 'refs/heads/main'
+    if: github.repository == 'EricsenSemedo/t3code-jev' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -24,15 +24,19 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
+          persist-credentials: false
       - id: merge
         name: Merge upstream main into a review branch
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          open_pr="$(gh pr list --base main --head automation/upstream-main --state open --json number --jq '.[0].number')"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git remote add upstream https://github.com/pingdotgg/t3code.git
-          git fetch upstream main --tags
+          git fetch --no-tags upstream +refs/heads/main:refs/remotes/upstream/main
           if git fetch origin automation/upstream-main:refs/remotes/origin/automation/upstream-main 2>/dev/null; then
             git checkout -B automation/upstream-main origin/automation/upstream-main
             before_sha="$(git rev-parse HEAD)"
@@ -45,6 +49,12 @@ jobs:
             git checkout -B automation/upstream-main origin/main
             before_sha="$(git rev-parse HEAD)"
           fi
+          if [[ -n "$open_pr" ]]; then
+            echo "Keeping the pending upstream batch stable; only refreshing its base if main advanced."
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+            if [[ "$(git rev-parse HEAD)" == "$before_sha" ]]; then echo "updated=false" >> "$GITHUB_OUTPUT"; else echo "updated=true" >> "$GITHUB_OUTPUT"; fi
+            exit 0
+          fi
           if git merge --no-ff --no-edit upstream/main; then
             if git diff --quiet origin/main HEAD; then echo "has_changes=false" >> "$GITHUB_OUTPUT"; else echo "has_changes=true" >> "$GITHUB_OUTPUT"; fi
             if [[ "$(git rev-parse HEAD)" == "$before_sha" ]]; then echo "updated=false" >> "$GITHUB_OUTPUT"; else echo "updated=true" >> "$GITHUB_OUTPUT"; fi
@@ -55,7 +65,11 @@ jobs:
           fi
       - name: Push review branch
         if: steps.merge.outputs.updated == 'true'
-        run: git push origin HEAD:automation/upstream-main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh auth setup-git
+          git push origin HEAD:automation/upstream-main
       - name: Open an upstream sync pull request
         if: steps.merge.outputs.has_changes == 'true'
         env:
@@ -63,7 +77,7 @@ jobs:
         shell: bash
         run: |
           if [[ -z "$(gh pr list --base main --head automation/upstream-main --state open --json number --jq '.[0].number')" ]]; then
-            gh pr create --base main --head automation/upstream-main --title "chore: sync upstream main" --body "This PR merges pingdotgg/t3code main into the Jev fork without resetting fork changes.\n\nIt is intentionally not auto-merged. Merge only after this repository's CI is green and the diff is reviewed."
+            gh pr create --base main --head automation/upstream-main --title "chore: sync upstream main" --body "Merges pingdotgg/t3code main while preserving Personal changes. Automatically merges only after the exact revision passes full CI, both installer builds and CodeRabbit approval, with no unresolved review threads. Conflicts or failed checks leave this PR pending. A successful merge triggers a Personal release."
           fi
       - name: Dispatch CI for the review branch
         if: steps.merge.outputs.updated == 'true'

@@ -1,0 +1,37 @@
+name: Complete upstream sync
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [automation/upstream-main]
+  schedule:
+    - cron: "11,26,41,56 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+  checks: read
+
+concurrency:
+  group: upstream-sync-main
+  cancel-in-progress: false
+
+jobs:
+  complete:
+    if: github.repository == 'EricsenSemedo/t3code-jev' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # Never execute the proposed sync branch with this workflow's write token.
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: actions/github-script@v8
+        with:
+          script: |
+            const { completeUpstreamSync } = require("./.github/scripts/complete-upstream-sync.cjs");
+            await completeUpstreamSync({ github, context, core });
