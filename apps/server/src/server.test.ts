@@ -115,6 +115,7 @@ import {
   resolveAvailableEditorsForConfig,
   resolveFileManagerRevealKindForConfig,
 } from "./ws.ts";
+import * as JevRoutingTestRecords from "./taskRouting/JevRoutingTestRecords.ts";
 import * as CheckpointDiffQuery from "./checkpointing/CheckpointDiffQuery.ts";
 import * as GitManager from "./git/GitManager.ts";
 import * as EnvironmentTheme from "./environmentTheme.ts";
@@ -8480,6 +8481,93 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       ]);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
+
+  for (const accepted of [false, true]) {
+    it.effect(`records Jev submission only after accepted dispatch (accepted=${accepted})`, () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "t3-jev-dispatch-failure-",
+        });
+        const submitted = vi.fn(
+          (_input: Parameters<JevRoutingTestRecords.JevRoutingTestRecords["submitted"]>[0]) => {
+            assert.equal(dispatchAttempted, true);
+            return Effect.void;
+          },
+        );
+        const recorderFactory = vi
+          .spyOn(JevRoutingTestRecords, "makeJevRoutingTestRecords")
+          .mockReturnValue({
+            begin: () => "test-correlation",
+            finish: () => undefined,
+            submitted,
+            drain: async () => undefined,
+          });
+        yield* Effect.addFinalizer(() => Effect.sync(() => recorderFactory.mockRestore()));
+        let dispatchAttempted = false;
+        yield* buildAppUnderTest({
+          config: { baseDir },
+          layers: {
+            orchestrationEngine: {
+              dispatch: () => {
+                dispatchAttempted = true;
+                return accepted
+                  ? Effect.succeed({ sequence: 1 })
+                  : Effect.fail(
+                      new PersistenceSqlError({
+                        operation: "OrchestrationEventStore.append:query",
+                        detail: "dispatch refused",
+                      }),
+                    );
+              },
+              readEvents: () => Stream.empty,
+            },
+          },
+        });
+        const wsUrl = yield* getWsServerUrl("/ws");
+        const dispatched = yield* Effect.match(
+          Effect.scoped(
+            withWsRpcClient(wsUrl, (client) =>
+              client[ORCHESTRATION_WS_METHODS.dispatchCommand]({
+                type: "thread.turn.start",
+                commandId: CommandId.make("cmd-jev-dispatch-failure"),
+                threadId: ThreadId.make("thread-jev-dispatch-failure"),
+                message: {
+                  messageId: MessageId.make("message-jev-dispatch-failure"),
+                  role: "user",
+                  text: "This prompt must not reach the test record.",
+                  attachments: [],
+                },
+                modelSelection: defaultModelSelection,
+                runtimeMode: "full-access",
+                interactionMode: "default",
+                routingTest: { correlationId: "unrecognized-correlation" },
+                createdAt: "2026-01-01T00:00:00.000Z",
+              }),
+            ),
+          ),
+          { onFailure: () => false, onSuccess: () => true },
+        );
+        assert.equal(dispatched, accepted);
+        assert.equal(dispatchAttempted, true);
+        assert.equal(submitted.mock.calls.length, accepted ? 1 : 0);
+        if (accepted) {
+          const observed = submitted.mock.calls[0]?.[0];
+          assert.equal(observed?.correlationId, "unrecognized-correlation");
+          assert.equal(observed?.model, defaultModelSelection.model);
+          assert.equal(observed?.commandId, "cmd-jev-dispatch-failure");
+          assert.deepEqual(Object.keys(observed ?? {}).toSorted(), [
+            "commandId",
+            "correlationId",
+            "messageId",
+            "model",
+            "sessionId",
+            "threadId",
+          ]);
+        }
+      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    );
+  }
 
   it.effect("routes websocket rpc orchestration shell snapshot errors", () =>
     Effect.gen(function* () {

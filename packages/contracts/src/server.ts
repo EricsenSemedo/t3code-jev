@@ -116,15 +116,22 @@ const TaskRouteSuggestionReady = Schema.Struct({
   escalationProbability: Schema.optionalKey(
     Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 1 })),
   ),
+  /** Present when the server queued a best-effort metadata-only local test record. */
+  correlationId: Schema.optionalKey(TrimmedNonEmptyString),
 });
 
 const TaskRouteSuggestionNotConfigured = Schema.Struct({
   status: Schema.Literal("not_configured"),
+  correlationId: Schema.optionalKey(TrimmedNonEmptyString),
 });
-const TaskRouteSuggestionUnavailable = Schema.Struct({ status: Schema.Literal("unavailable") });
+const TaskRouteSuggestionUnavailable = Schema.Struct({
+  status: Schema.Literal("unavailable"),
+  correlationId: Schema.optionalKey(TrimmedNonEmptyString),
+});
 const TaskRouteSuggestionBlocked = Schema.Struct({
   status: Schema.Literal("blocked"),
   reason: Schema.Literals(["sensitive_input", "continuation"]),
+  correlationId: Schema.optionalKey(TrimmedNonEmptyString),
 });
 
 /** Classification only; the caller decides whether to use it for an opted-in turn. */

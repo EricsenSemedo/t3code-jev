@@ -156,6 +156,7 @@ import * as UsageLimitSources from "./usage/UsageLimitSources.ts";
 import * as UsageService from "./usage/UsageService.ts";
 import * as TraceDiagnostics from "./diagnostics/TraceDiagnostics.ts";
 import * as JevTaskRouteSuggestion from "./taskRouting/JevTaskRouteSuggestion.ts";
+import * as JevRoutingTestRecords from "./taskRouting/JevRoutingTestRecords.ts";
 import * as PullRequestService from "./pullRequest/PullRequestService.ts";
 import { listLinkedPullRequestThreads } from "./pullRequest/linkedThreads.ts";
 import { pullRequestSyncKey } from "./pullRequest/pullRequestSyncKey.ts";
@@ -498,6 +499,7 @@ const makeWsRpcLayer = (
   clientAnalyticsProps: Readonly<Record<string, unknown>>,
   previewAutomationBroker: PreviewAutomationBroker.PreviewAutomationBroker["Service"],
   taskRouteSuggestion: JevTaskRouteSuggestion.JevTaskRouteSuggestionService,
+  routingTestRecords: JevRoutingTestRecords.JevRoutingTestRecords,
 ) =>
   WsRpcGroup.toLayer(
     Effect.gen(function* () {
@@ -1868,6 +1870,24 @@ const makeWsRpcLayer = (
               const result = yield* dispatchNormalizedCommand(normalizedCommand).pipe(
                 Effect.tapError(() => cleanupFailedUploadedAttachments(command, normalizedCommand)),
               );
+              if (normalizedCommand.type === "thread.turn.start") {
+                const effort = normalizedCommand.modelSelection?.options?.find(
+                  (option) => option.id === "reasoningEffort" && typeof option.value === "string",
+                )?.value;
+                yield* routingTestRecords.submitted({
+                  sessionId: String(currentSessionId),
+                  ...(normalizedCommand.routingTest
+                    ? { correlationId: normalizedCommand.routingTest.correlationId }
+                    : {}),
+                  threadId: String(normalizedCommand.threadId),
+                  messageId: String(normalizedCommand.message.messageId),
+                  commandId: String(normalizedCommand.commandId),
+                  ...(normalizedCommand.modelSelection?.model
+                    ? { model: normalizedCommand.modelSelection.model }
+                    : {}),
+                  ...(typeof effort === "string" ? { effort } : {}),
+                });
+              }
               yield* recordClientCommandAnalytics(normalizedCommand);
               yield* ProjectCloneTracker.discardCloneForDeletedProject(
                 projectCloneTracker,
@@ -2615,9 +2635,11 @@ const makeWsRpcLayer = (
             "rpc.aggregate": "server",
           }),
         [WS_METHODS.serverSuggestTaskRoute]: (input) =>
-          observeRpcEffect(WS_METHODS.serverSuggestTaskRoute, taskRouteSuggestion.suggest(input), {
-            "rpc.aggregate": "server",
-          }),
+          observeRpcEffect(
+            WS_METHODS.serverSuggestTaskRoute,
+            taskRouteSuggestion.suggest(input, String(currentSessionId)),
+            { "rpc.aggregate": "server" },
+          ),
         [WS_METHODS.serverReportClientActivity]: (input, metadata) =>
           Ref.update(rpcClientIds, (clientIds) => {
             const next = new Set(clientIds);
@@ -3718,9 +3740,12 @@ const makeWsRpcLayer = (
 export const websocketRpcRouteLayer = Layer.unwrap(
   Effect.gen(function* () {
     const previewAutomationBroker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
-    const taskRouteSuggestion = yield* JevTaskRouteSuggestion.make();
     const baseServerSelfUpdate = yield* ServerSelfUpdate.ServerSelfUpdate;
     const config = yield* ServerConfig.ServerConfig;
+    const routingTestRecords = JevRoutingTestRecords.makeJevRoutingTestRecords({
+      stateDir: config.stateDir,
+    });
+    const taskRouteSuggestion = yield* JevTaskRouteSuggestion.make({ records: routingTestRecords });
     const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
     const serverSelfUpdate = yield* ServerSelfUpdate.withRunningThreadContinuation({
       mode: config.mode,
@@ -3786,6 +3811,7 @@ export const websocketRpcRouteLayer = Layer.unwrap(
               clientAnalyticsProps,
               previewAutomationBroker,
               taskRouteSuggestion,
+              routingTestRecords,
             ).pipe(
               Layer.provideMerge(RpcSerialization.layerJson),
               Layer.provide(Layer.succeed(SqlClient.SqlClient, sql)),
