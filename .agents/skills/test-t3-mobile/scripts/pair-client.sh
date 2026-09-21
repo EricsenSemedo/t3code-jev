@@ -15,6 +15,22 @@ mobile_origin="$3"
 agent_device_command="$4"
 shift 4
 
+if ! MOBILE_ORIGIN="$mobile_origin" node - <<'NODE'
+const origin = new URL(process.env.MOBILE_ORIGIN);
+const localHttpHosts = new Set(["localhost", "127.0.0.1", "[::1]", "10.0.2.2"]);
+const tailnetHost = origin.hostname.endsWith(".ts.net");
+if (
+  origin.protocol !== "https:" &&
+  !(origin.protocol === "http:" && (localHttpHosts.has(origin.hostname) || tailnetHost))
+) {
+  throw new Error("Remote pairing origins must use HTTPS.");
+}
+NODE
+then
+  echo "Use HTTPS for remote mobile pairing origins; HTTP is only supported for local emulators or a Tailscale development hostname." >&2
+  exit 2
+fi
+
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 

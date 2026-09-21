@@ -4,7 +4,7 @@ Load this reference only when inspecting or seeding local T3 state directly.
 
 ## Select the correct database
 
-When `--base-dir` or `--home-dir` is explicit, runtime state lives under `<base-dir>/userdata` and the database path is `<base-dir>/userdata/state.sqlite`. The `<base-dir>/dev` state directory is only the fallback for an implicit development home, preventing an ordinary `vp run dev` from touching production state.
+When `--base-dir` is explicit, runtime state lives under `<base-dir>/userdata` and the database path is `<base-dir>/userdata/state.sqlite`. The `<base-dir>/dev` state directory is only the fallback for an implicit development home, preventing an ordinary `vp run dev` from touching production state.
 
 Start the target runtime once before seeding so all migrations have run. Use an isolated base directory. Stop the server before writes to avoid racing application state or an active projection.
 

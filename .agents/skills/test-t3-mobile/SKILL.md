@@ -57,7 +57,8 @@ arguments stored in `agent_device_command` and the Bash array
 It issues a fresh credential and opens T3 Code Dev's existing pairing route
 through AgentDevice. For a backend on the device host, use
 `http://127.0.0.1:<server-port>` on iOS or `http://10.0.2.2:<server-port>`
-on Android. For a remote backend, use its reachable origin.
+on Android. For a remote backend, use its reachable HTTPS origin. An HTTP
+Tailscale hostname is accepted only for local development.
 
 Confirm the intended projects appear, exercise the affected flow, and capture
 evidence. Retain the app and environment while iterating. At teardown, remove

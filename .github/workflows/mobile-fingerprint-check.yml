@@ -24,7 +24,7 @@ concurrency:
 jobs:
   fingerprint:
     name: Native fingerprint diff
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       issues: write
@@ -40,6 +40,7 @@ jobs:
           # and compare against its first parent, rather than the event's base.
           ref: ${{ github.sha }}
           fetch-depth: 2
+          persist-credentials: false
 
       - id: changes
         name: Detect native fingerprint inputs

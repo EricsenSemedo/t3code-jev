@@ -32,6 +32,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
         with:
+          persist-credentials: false
           sparse-checkout: |
             /*
             !/.repos/
@@ -68,9 +69,12 @@ jobs:
       # so file-scoped runs call `vp test run` inside the package instead.
       - name: Test
         shell: pwsh
+        env:
+          INPUT_PACKAGE: ${{ inputs.package }}
+          INPUT_FILES: ${{ inputs.files }}
         run: |
-          $package = '${{ inputs.package }}'
-          $files = '${{ inputs.files }}'
+          $package = $env:INPUT_PACKAGE
+          $files = $env:INPUT_FILES
           if ($package -eq '') {
             vp run --parallel --concurrency-limit 4 --filter '!t3' --filter '!@t3tools/monorepo' test
           } elseif ($files -eq '') {

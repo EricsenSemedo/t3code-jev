@@ -119,6 +119,11 @@ test("releases the first nightly when no nightly is published", async () => {
   assert.equal(await shouldReleaseNightly(options), true);
 });
 
+test("does not treat an unversioned legacy tag as a nightly", async () => {
+  const { options } = fixture({ releases: [nightly(0, { tag_name: "nightly-v0.9.0" })] });
+  assert.equal(await shouldReleaseNightly(options), true);
+});
+
 test("waits six hours after publication, including manual nightlies", async () => {
   for (const age of [0, 3, 6 - 1 / 3600]) {
     const { options, calls } = fixture({ releases: [nightly(age)] });
@@ -141,7 +146,11 @@ test("skips unchanged commits after the gap", async () => {
 
 test("uses publication time, not release order or the tagged commit date", async () => {
   const { options } = fixture({
-    releases: [nightly(10), nightly(1), nightly(20, { tag_name: "nightly-v0.9.0" })],
+    releases: [
+      nightly(10),
+      nightly(1),
+      nightly(20, { tag_name: "nightly-v0.9.0-nightly.20260905.5" }),
+    ],
   });
   assert.equal(await shouldReleaseNightly(options), false);
 });
@@ -154,7 +163,7 @@ test("ignores stable releases and drafts when checking the gap", async () => {
 });
 
 test("compares against the published tag, including legacy nightly tags", async () => {
-  const tag = "nightly-v0.9.0";
+  const tag = "nightly-v0.9.0-nightly.20260905.5";
   const { options, calls } = fixture({ releases: [nightly(7, { tag_name: tag })] });
   assert.equal(await shouldReleaseNightly(options), true);
   assert.equal(calls[0].basehead, `${tag}...new`);
