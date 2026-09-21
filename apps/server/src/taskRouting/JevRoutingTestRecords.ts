@@ -91,7 +91,7 @@ export interface JevRoutingTestRecords {
     readonly model?: string;
     readonly effort?: string;
   }) => Effect.Effect<void>;
-  /** Test-only drain for the serialized best-effort writer. */
+  /** Flush queued writes at server teardown and in tests. */
   readonly drain: () => Promise<void>;
 }
 

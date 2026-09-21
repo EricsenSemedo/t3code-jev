@@ -3745,6 +3745,9 @@ export const websocketRpcRouteLayer = Layer.unwrap(
     const routingTestRecords = JevRoutingTestRecords.makeJevRoutingTestRecords({
       stateDir: config.stateDir,
     });
+    // Finish queued writes before the server scope releases its state directory.
+    // Normal turn dispatch still only queues metadata and never awaits disk I/O.
+    yield* Effect.addFinalizer(() => Effect.promise(() => routingTestRecords.drain()));
     const taskRouteSuggestion = yield* JevTaskRouteSuggestion.make({ records: routingTestRecords });
     const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
     const serverSelfUpdate = yield* ServerSelfUpdate.withRunningThreadContinuation({

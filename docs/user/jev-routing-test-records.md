@@ -23,8 +23,8 @@ is enabled and Personal is the primary environment. A `failed` route record mean
 `apiRequested` flag to distinguish preflight skips from a request that could
 not produce a usable answer.
 
-These are best-effort observations, not a durable audit log. Disk errors or a
-server exit can lose queued records. Correlations and submission deduplication
+These are best-effort observations, not a durable audit log. Disk errors, an overloaded
+writer, or an abrupt server exit can lose records. Correlations and submission deduplication
 last up to ten minutes in memory and reset when the server restarts. A linked
 submission records the accepted model selection; it does not prove the model
 completed the task or that Jev improved the outcome. Shadow mode records the
