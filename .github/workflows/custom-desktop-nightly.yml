@@ -32,10 +32,11 @@ jobs:
           cache: true
           run-install: true
       - id: changes
-        shell: bash
-        run: |
-          tag="$(git tag --list 'v*-nightly.*' 'nightly-v*' --sort=-creatordate | head -n 1)"
-          if [[ -n "$tag" && "$(git rev-parse "$tag^{commit}")" == "$(git rev-parse HEAD)" ]]; then echo "has_changes=false" >> "$GITHUB_OUTPUT"; else echo "has_changes=true" >> "$GITHUB_OUTPUT"; fi
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const { shouldReleaseNightly } = require("./.github/scripts/check-nightly-release.cjs");
+            core.setOutput("has_changes", String(await shouldReleaseNightly({ github, context, core })));
       - id: meta
         if: steps.changes.outputs.has_changes == 'true'
         env:
