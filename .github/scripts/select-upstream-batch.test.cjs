@@ -1,4 +1,8 @@
 const assert = require("node:assert/strict");
+const { execFileSync } = require("node:child_process");
+const { mkdtempSync, rmSync, writeFileSync } = require("node:fs");
+const { tmpdir } = require("node:os");
+const { join } = require("node:path");
 const test = require("node:test");
 const { mergedFileLimit, selectUpstreamBatch } = require("./select-upstream-batch.cjs");
 
@@ -50,7 +54,9 @@ test("does not inspect a pending upstream batch", () => {
     upstream: "upstream/main",
     maxFiles: 100,
     openPr: true,
-    runGit: () => { throw new Error("must not inspect Git"); },
+    runGit: () => {
+      throw new Error("must not inspect Git");
+    },
   });
   assert.deepEqual(result, { status: "open_stable" });
 });
@@ -79,15 +85,31 @@ test("pauses when the first upstream commit conflicts", () => {
   assert.deepEqual(result, { status: "conflict", commit: "conflicted" });
 });
 
-test("rejects a reusable automation branch whose actual merge diff exceeds the limit", () => {
+function git(cwd, ...args) {
+  return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+}
+
+test("rejects a reusable automation branch whose actual merge diff exceeds the limit", (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "t3-upstream-batch-"));
+  t.after(() => rmSync(directory, { force: true, recursive: true }));
+  git(directory, "init", "-q", "-b", "main");
+  git(directory, "config", "user.name", "Test");
+  git(directory, "config", "user.email", "test@example.com");
+  writeFileSync(join(directory, "base.txt"), "base\n");
+  git(directory, "add", "base.txt");
+  git(directory, "commit", "-qm", "base");
+  git(directory, "checkout", "-qb", "automation/upstream-main");
+  for (let index = 0; index <= 100; index += 1) {
+    writeFileSync(join(directory, `stale-${index}.txt`), "stale\n");
+  }
+  git(directory, "add", ".");
+  git(directory, "commit", "-qm", "stale automation batch");
+
   const result = mergedFileLimit({
-    base: "origin/main",
+    base: "main",
     head: "HEAD",
     maxFiles: 100,
-    runGit: (args) => {
-      assert.deepEqual(args, ["diff", "--no-renames", "--name-only", "origin/main", "HEAD"]);
-      return Array.from({ length: 101 }, (_, i) => `stale/${i}`).join("\n");
-    },
+    runGit: (args) => git(directory, ...args),
   });
   assert.deepEqual(result, { status: "over_limit", files: 101 });
 });

@@ -34,6 +34,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          trusted_selector="$RUNNER_TEMP/select-upstream-batch.cjs"
+          cp .github/scripts/select-upstream-batch.cjs "$trusted_selector"
           open_pr="$(gh pr list --repo "$GITHUB_REPOSITORY" --base main --head automation/upstream-main --state open --json number --jq '.[0].number')"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -51,7 +53,7 @@ jobs:
             git checkout -B automation/upstream-main origin/main
             before_sha="$(git rev-parse HEAD)"
           fi
-          actual_limit="$(node .github/scripts/select-upstream-batch.cjs --base origin/main --head HEAD --max-files 100)"
+          actual_limit="$(node "$trusted_selector" --base origin/main --head HEAD --max-files 100)"
           actual_status="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).status)' "$actual_limit")"
           if [[ "$actual_status" != "within_limit" ]]; then
             echo "The actual review-branch diff exceeds the 100-file CodeRabbit limit: $actual_limit" >&2
@@ -63,7 +65,7 @@ jobs:
             if [[ "$(git rev-parse HEAD)" == "$before_sha" ]]; then echo "updated=false" >> "$GITHUB_OUTPUT"; else echo "updated=true" >> "$GITHUB_OUTPUT"; fi
             exit 0
           fi
-          selection="$(node .github/scripts/select-upstream-batch.cjs --base origin/main --upstream upstream/main --max-files 100)"
+          selection="$(node "$trusted_selector" --base origin/main --upstream upstream/main --max-files 100)"
           selection_status="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).status)' "$selection")"
           case "$selection_status" in
             no_changes)
@@ -84,7 +86,7 @@ jobs:
               ;;
           esac
           if git merge --no-ff --no-edit "$upstream_commit"; then
-            actual_limit="$(node .github/scripts/select-upstream-batch.cjs --base origin/main --head HEAD --max-files 100)"
+            actual_limit="$(node "$trusted_selector" --base origin/main --head HEAD --max-files 100)"
             actual_status="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).status)' "$actual_limit")"
             if [[ "$actual_status" != "within_limit" ]]; then
               echo "The actual review-branch diff exceeds the 100-file CodeRabbit limit: $actual_limit" >&2

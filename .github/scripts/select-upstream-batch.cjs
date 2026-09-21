@@ -1,7 +1,15 @@
 const { execFileSync } = require("node:child_process");
 
 function changedFileCount(runGit, base, tree) {
-  const files = runGit(["diff-tree", "--no-commit-id", "--no-renames", "--name-only", "-r", base, tree]);
+  const files = runGit([
+    "diff-tree",
+    "--no-commit-id",
+    "--no-renames",
+    "--name-only",
+    "-r",
+    base,
+    tree,
+  ]);
   return files ? files.split("\n").filter(Boolean).length : 0;
 }
 
@@ -55,8 +63,16 @@ if (require.main === module) {
   const upstream = value("--upstream");
   const head = value("--head");
   const maxFiles = Number(value("--max-files"));
-  if (!base || !Number.isInteger(maxFiles) || maxFiles < 1 || (!upstream && !head) || (upstream && head)) {
-    throw new Error("Usage: select-upstream-batch.cjs --base <ref> (--upstream <ref> | --head <ref>) --max-files <positive integer>");
+  if (
+    !base ||
+    !Number.isInteger(maxFiles) ||
+    maxFiles < 1 ||
+    (!upstream && !head) ||
+    (upstream && head)
+  ) {
+    throw new Error(
+      "Usage: select-upstream-batch.cjs --base <ref> (--upstream <ref> | --head <ref>) --max-files <positive integer>",
+    );
   }
   const result = head
     ? mergedFileLimit({ base, head, maxFiles, runGit: git })
