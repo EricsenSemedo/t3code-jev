@@ -8,7 +8,7 @@ const REQUIRED_JOBS = [
   "Desktop installer (win)",
 ];
 
-async function completeUpstreamSync({ github, context, core }) {
+async function completeUpstreamSync({ github, context, core, now = Date.now() }) {
   const repo = context.repo;
   const pending = (reason) => {
     core.info(`Upstream sync waiting: ${reason}`);
@@ -56,6 +56,24 @@ async function completeUpstreamSync({ github, context, core }) {
   }
   const approval = latestReviews.get("coderabbitai[bot]");
   if (approval?.state !== "APPROVED" || approval.commit_id !== head) {
+    // A rate-limited automatic review is not retried just because CI completed.
+    // Retry at most hourly without treating a successful bot status as approval.
+    const marker = "<!-- personal-upstream-review -->";
+    const comments = await github.paginate(github.rest.issues.listComments, {
+      ...repo,
+      issue_number: number,
+      per_page: 100,
+    });
+    const lastRequest = comments
+      .filter((c) => c.user.login === "github-actions[bot]" && c.body.includes(marker))
+      .reduce((latest, c) => Math.max(latest, Date.parse(c.created_at)), 0);
+    if (now - lastRequest >= 60 * 60 * 1000) {
+      await github.rest.issues.createComment({
+        ...repo,
+        issue_number: number,
+        body: `@coderabbitai full review\n\n${marker}\nRequesting review of upstream revision ${head}; merge remains gated on approval.`,
+      });
+    }
     return pending("CodeRabbit approval is missing or belongs to an older revision");
   }
   const { repository } = await github.graphql(

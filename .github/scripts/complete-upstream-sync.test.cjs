@@ -30,6 +30,8 @@ function fixture() {
     status: { statuses: [{ state: "success" }], state: "success" },
     merges: [],
     dispatches: [],
+    comments: [],
+    requests: [],
   };
   let reads = 0;
   const github = {
@@ -55,6 +57,12 @@ function fixture() {
         },
       },
       checks: { listForRef: async () => state.checks },
+      issues: {
+        listComments: async () => state.comments,
+        createComment: async (args) => {
+          state.requests.push(args);
+        },
+      },
     },
     paginate: (fn, args) => fn(args),
     graphql: async () => ({ repository: { pullRequest: { reviewThreads: state.threads } } }),
@@ -157,4 +165,29 @@ test("publication failure is visible after merge; hourly release schedule can re
   };
   await assert.rejects(completeUpstreamSync(options), /API unavailable/);
   assert.equal(state.merges.length, 1);
+});
+
+test("retries a missing review but never merges on a request alone", async () => {
+  const { state, options } = fixture();
+  state.reviews = [];
+  assert.equal(await completeUpstreamSync(options), false);
+  assert.match(state.requests[0].body, /@coderabbitai full review/);
+  assert.equal(state.merges.length, 0);
+});
+
+test("review retries are throttled across scheduled gate runs", async () => {
+  const { state, options } = fixture();
+  const now = Date.parse("2026-09-21T12:00:00Z");
+  state.reviews = [];
+  state.comments = [
+    {
+      user: { login: "github-actions[bot]" },
+      body: "<!-- personal-upstream-review -->",
+      created_at: new Date(now - 1000).toISOString(),
+    },
+  ];
+  await completeUpstreamSync({ ...options, now });
+  assert.equal(state.requests.length, 0);
+  await completeUpstreamSync({ ...options, now: now + 60 * 60 * 1000 });
+  assert.equal(state.requests.length, 1);
 });
