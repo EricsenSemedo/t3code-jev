@@ -44,6 +44,7 @@ jobs:
       - run: vp run --filter @t3tools/desktop ensure:electron
       - run: vp run test
       - run: python3 .github/scripts/stage-preview-bundle.test.py
+      - run: node --test .github/scripts/complete-upstream-sync.test.cjs .github/scripts/check-nightly-release.test.cjs
 
   desktop_installer:
     name: Desktop installer (${{ matrix.platform }})

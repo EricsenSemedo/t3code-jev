@@ -144,6 +144,17 @@ test("skips unchanged commits after the gap", async () => {
   assert.equal(await shouldReleaseNightly(options), false);
 });
 
+test("Personal can release new commits immediately without changing the upstream default gap", async () => {
+  const { options } = fixture({ releases: [nightly(0)] });
+  assert.equal(await shouldReleaseNightly(options), false);
+  assert.equal(await shouldReleaseNightly({ ...options, minimumReleaseGapMs: 0 }), true);
+});
+
+test("Personal still skips unchanged commits with no minimum gap", async () => {
+  const { options } = fixture({ releases: [nightly(0)], comparisonStatus: "identical" });
+  assert.equal(await shouldReleaseNightly({ ...options, minimumReleaseGapMs: 0 }), false);
+});
+
 test("uses publication time, not release order or the tagged commit date", async () => {
   const { options } = fixture({
     releases: [

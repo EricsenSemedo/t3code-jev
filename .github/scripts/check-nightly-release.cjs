@@ -52,7 +52,13 @@ async function findLatestNightly({ github, context }) {
 }
 
 // Runs after the workflow acquires the nightly concurrency lock.
-async function shouldReleaseNightly({ github, context, core, now = Date.now() }) {
+async function shouldReleaseNightly({
+  github,
+  context,
+  core,
+  now = Date.now(),
+  minimumReleaseGapMs = MINIMUM_RELEASE_GAP_MS,
+}) {
   const lastNightly = await findLatestNightly({ github, context });
 
   if (!lastNightly) {
@@ -60,8 +66,8 @@ async function shouldReleaseNightly({ github, context, core, now = Date.now() })
     return true;
   }
 
-  if (now - Date.parse(lastNightly.published_at) < MINIMUM_RELEASE_GAP_MS) {
-    core.info(`Nightly ${lastNightly.tag_name} was published less than six hours ago. Skipping.`);
+  if (now - Date.parse(lastNightly.published_at) < minimumReleaseGapMs) {
+    core.info(`Nightly ${lastNightly.tag_name} is within the minimum release gap. Skipping.`);
     return false;
   }
 
@@ -77,7 +83,7 @@ async function shouldReleaseNightly({ github, context, core, now = Date.now() })
     return false;
   }
 
-  core.info(`New commits since ${lastNightly.tag_name}, and the six-hour gap has passed.`);
+  core.info(`New commits since ${lastNightly.tag_name}, and the minimum release gap has passed.`);
   return true;
 }
 
