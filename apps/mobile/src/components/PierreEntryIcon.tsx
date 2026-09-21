@@ -1,4 +1,4 @@
-import { SymbolView } from "expo-symbols";
+import { SymbolView } from "../components/AppSymbol";
 import { Image, type ImageStyle, type StyleProp } from "react-native";
 
 import { markdownFileIconSource } from "@t3tools/mobile-markdown-text/file-icons";
@@ -12,7 +12,14 @@ export function PierreEntryIcon(props: {
 }) {
   const size = props.size ?? 16;
   if (props.kind === "directory") {
-    return <SymbolView name="folder" size={size} tintColor="#a1a1aa" type="monochrome" />;
+    return (
+      <SymbolView
+        name="folder"
+        size={size}
+        tintColorClassName={"accent-icon-subtle"}
+        type="monochrome"
+      />
+    );
   }
 
   return (

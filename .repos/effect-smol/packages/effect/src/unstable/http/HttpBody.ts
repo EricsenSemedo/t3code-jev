@@ -1,71 +1,29 @@
 /**
- * Describes the body attached to outgoing HTTP requests and server responses.
+ * Describes HTTP request and response bodies before they reach a platform
+ * adapter.
  *
- * `HttpBody` is the transport-facing representation used by the HTTP modules
- * before a platform adapter turns a request or response into a concrete Web,
- * Node, or other runtime value. Each body variant carries the payload plus the
- * metadata an adapter can safely know ahead of time, such as `contentType` and
- * `contentLength`.
- *
- * **Mental model**
- *
- * - {@link empty} represents an absent body.
- * - {@link uint8Array}, {@link text}, {@link jsonUnsafe}, {@link json}, and
- *   {@link urlParams} build in-memory byte bodies with content metadata.
- * - {@link formData} and {@link formDataRecord} keep multipart data as
- *   `FormData` so the runtime can generate the boundary.
- * - {@link stream} represents a stream of `Uint8Array` chunks and may omit the
- *   content length when the final size is not known.
- * - {@link raw} is the escape hatch for platform-specific body values that an
- *   adapter already knows how to send.
- *
- * **Common tasks**
- *
- * - Send text, bytes, JSON, URL-encoded data, multipart forms, or files.
- * - Use {@link json} or {@link jsonSchema} when JSON encoding failures should
- *   be represented as `HttpBodyError` values.
- * - Use {@link file} or {@link fileFromInfo} when file metadata should become
- *   `contentType` / `contentLength` metadata for the adapter.
- * - Use {@link isHttpBody} when accepting unknown values at an integration
- *   boundary.
- *
- * **Gotchas**
- *
- * - {@link jsonUnsafe} calls `JSON.stringify` directly and can throw; prefer
- *   {@link json} in effectful code.
- * - `FormData` bodies intentionally leave `contentType` unset because setting a
- *   multipart header without the generated boundary produces invalid requests.
- * - Stream bodies may not have a `contentLength`; code that requires one must
- *   provide it explicitly when constructing the stream body.
- *
- * **Example** (Creating common body variants)
- *
- * ```ts
- * import { HttpBody, UrlParams } from "effect/unstable/http"
- * import * as assert from "node:assert"
- *
- * const textBody = HttpBody.text("hello")
- * const jsonBody = HttpBody.jsonUnsafe({ name: "Ada" })
- * const formBody = HttpBody.urlParams(UrlParams.fromInput({ q: "effect" }))
- *
- * assert.equal(textBody.contentType, "text/plain")
- * assert.equal(jsonBody.contentType, "application/json")
- * assert.equal(formBody.contentType, "application/x-www-form-urlencoded")
- * ```
+ * `HttpBody` is the shared body representation used by the HTTP modules. Each
+ * variant stores the payload together with metadata that can be known before
+ * sending it, such as `contentType` and `contentLength`. This module includes
+ * body constructors for common payload shapes, support for schema-encoded JSON
+ * bodies, streaming and file-backed bodies, and the error type used when body
+ * construction fails.
  *
  * @since 4.0.0
  */
+import * as ByteSize from "../../ByteSize.ts"
 import * as Data from "../../Data.ts"
 import * as Effect from "../../Effect.ts"
 import * as FileSystem from "../../FileSystem.ts"
 import { format } from "../../Formatter.ts"
 import * as Inspectable from "../../Inspectable.ts"
-import type * as PlatformError from "../../PlatformError.ts"
+import * as Option from "../../Option.ts"
+import * as PlatformError from "../../PlatformError.ts"
 import * as Predicate from "../../Predicate.ts"
 import * as Schema from "../../Schema.ts"
 import type { ParseOptions } from "../../SchemaAST.ts"
 import type { Issue } from "../../SchemaIssue.ts"
-import * as Parser from "../../SchemaParser.ts"
+import * as SchemaParser from "../../SchemaParser.ts"
 import type * as Stream_ from "../../Stream.ts"
 import * as UrlParams from "./UrlParams.ts"
 
@@ -74,7 +32,7 @@ const TypeId = "~effect/http/HttpBody"
 /**
  * Returns `true` if the provided value is an `HttpBody`.
  *
- * @category refinements
+ * @category guards
  * @since 4.0.0
  */
 export const isHttpBody = (u: unknown): u is HttpBody => Predicate.hasProperty(u, TypeId)
@@ -268,19 +226,26 @@ export const raw = (
  */
 export class Uint8Array extends Proto {
   readonly _tag = "Uint8Array"
-  readonly body: globalThis.Uint8Array
   readonly contentType: string
   readonly contentLength: number
+  /** Original text retained for adapters that can skip encoding. */
+  readonly text: string | undefined
+  private _body: globalThis.Uint8Array | undefined
 
   constructor(
-    body: globalThis.Uint8Array,
+    body: globalThis.Uint8Array | undefined,
     contentType: string,
-    contentLength: number
+    contentLength: number,
+    text?: string
   ) {
     super()
-    this.body = body
+    this._body = body
+    this.text = text
     this.contentType = contentType
     this.contentLength = contentLength
+  }
+  get body(): globalThis.Uint8Array {
+    return this._body ??= encodeText(this.text!)
   }
   toJSON(): unknown {
     const toString = this.contentType.startsWith("text/") || this.contentType.endsWith("json")
@@ -309,18 +274,38 @@ export const uint8Array = (body: globalThis.Uint8Array, contentType?: string): U
 
 const encoder = new TextEncoder()
 
+// Buffer encodes UTF-8 faster than TextEncoder when available.
+const buffer = (globalThis as {
+  readonly Buffer?: {
+    readonly from: (body: string, encoding: "utf8") => globalThis.Uint8Array
+    readonly byteLength: (body: string, encoding: "utf8") => number
+  }
+}).Buffer
+const encodeText: (body: string) => globalThis.Uint8Array = buffer !== undefined
+  ? (body) => buffer.from(body, "utf8")
+  : (body) => encoder.encode(body)
+
 /**
  * Creates a UTF-8 encoded text HTTP body.
  *
  * **Details**
  *
- * The content type defaults to `text/plain`.
+ * The content type defaults to `text/plain`. Text bodies are encoded lazily.
  *
  * @category constructors
  * @since 4.0.0
  */
-export const text = (body: string, contentType?: string): Uint8Array =>
-  uint8Array(encoder.encode(body), contentType ?? "text/plain")
+export const text = (body: string, contentType?: string): Uint8Array => {
+  if (typeof body !== "string") {
+    // Preserve untyped callers that relied on TextEncoder coercion.
+    body = body === undefined ? "" : String(body)
+  }
+  if (buffer !== undefined) {
+    return new Uint8Array(undefined, contentType ?? "text/plain", buffer.byteLength(body, "utf8"), body)
+  }
+  const bytes = encoder.encode(body)
+  return new Uint8Array(bytes, contentType ?? "text/plain", bytes.length, body)
+}
 
 /**
  * Creates a JSON HTTP body using `JSON.stringify`, throwing if serialization fails.
@@ -361,11 +346,11 @@ export const json = (body: unknown, contentType?: string): Effect.Effect<Uint8Ar
  * @category constructors
  * @since 4.0.0
  */
-export const jsonSchema = <S extends Schema.Top>(
+export const jsonSchema = <S extends Schema.Constraint>(
   schema: S,
   options?: ParseOptions | undefined
 ) => {
-  const encode = Parser.encodeUnknownEffect(Schema.toCodecJson(schema))
+  const encode = SchemaParser.encodeUnknownEffect(Schema.toCodecJson(schema))
   return (body: S["Type"], contentType?: string): Effect.Effect<Uint8Array, HttpBodyError, S["EncodingServices"]> =>
     encode(body, options).pipe(
       Effect.mapError((issue) => new HttpBodyError({ reason: { _tag: "SchemaError", issue }, cause: issue })),
@@ -379,8 +364,8 @@ export const jsonSchema = <S extends Schema.Top>(
  * @category constructors
  * @since 4.0.0
  */
-export const urlParams = (urlParams: UrlParams.UrlParams, contentType?: string): Uint8Array =>
-  text(UrlParams.toString(urlParams), contentType ?? "application/x-www-form-urlencoded")
+export const urlParams = (urlParams: UrlParams.Input, contentType?: string): Uint8Array =>
+  text(UrlParams.toString(UrlParams.fromInput(urlParams)), contentType ?? "application/x-www-form-urlencoded")
 
 /**
  * HTTP body variant backed by Web `FormData`.
@@ -528,12 +513,61 @@ export const stream = (
   contentLength?: number
 ): Stream => new Stream(body, contentType ?? "application/octet-stream", contentLength)
 
+const fileRangeSize = (
+  input: ByteSize.Input,
+  field: string,
+  method: string
+): Effect.Effect<ByteSize.ByteSize, PlatformError.PlatformError> => {
+  const size = ByteSize.fromInput(input)
+  return Option.isSome(size)
+    ? Effect.succeed(size.value)
+    : Effect.fail(PlatformError.badArgument({
+      module: "HttpBody",
+      method,
+      description: `Invalid ${field}: ${input}`
+    }))
+}
+
+const fileContentLength = Effect.fnUntraced(function*(
+  size: ByteSize.ByteSize,
+  method: string,
+  options?: {
+    readonly bytesToRead?: ByteSize.Input | undefined
+    readonly offset?: ByteSize.Input | undefined
+  }
+): Effect.fn.Return<number, PlatformError.PlatformError> {
+  const offset = options?.offset === undefined ? ByteSize.zero : yield* fileRangeSize(options.offset, "offset", method)
+  const bytesToRead = options?.bytesToRead === undefined
+    ? undefined
+    : yield* fileRangeSize(options.bytesToRead, "bytesToRead", method)
+  const available = offset >= size ? BigInt("0") : size - offset
+  const length = bytesToRead === undefined || bytesToRead > available ? available : bytesToRead
+  if (length > BigInt(Number.MAX_SAFE_INTEGER)) {
+    return yield* Effect.fail(PlatformError.badArgument({
+      module: "HttpBody",
+      method,
+      description: `Content length exceeds Number.MAX_SAFE_INTEGER: ${length}`
+    }))
+  }
+  return Number(length)
+})
+
 /**
  * Creates a streaming HTTP body for a file path.
  *
  * **Details**
  *
- * The effect requires `FileSystem`, stats the file to set the content length, and can fail with `PlatformError`.
+ * The effect requires `FileSystem`, stats the file to set the selected content length, and can fail with
+ * `PlatformError`.
+ *
+ * Range validation and file access are deferred until the effect runs. Numeric range inputs must be
+ * non-negative safe integers; bigint and byte-size strings can represent larger values. Malformed strings,
+ * negative values, and non-finite, fractional, or unsafe numbers fail with `PlatformError` / `BadArgument`.
+ *
+ * The selected length is calculated exactly with bigint arithmetic and clamped to the bytes available after
+ * `offset` (zero at or past EOF). Since `Stream.contentLength` is a number, a final length above
+ * `Number.MAX_SAFE_INTEGER` fails with `BadArgument`. Larger sizes, offsets, and byte counts are valid when
+ * the final clamped length is representable; the resulting Content-Length header preserves that exact length.
  *
  * @category constructors
  * @since 4.0.0
@@ -541,21 +575,22 @@ export const stream = (
 export const file = (
   path: string,
   options?: {
-    readonly bytesToRead?: FileSystem.SizeInput | undefined
-    readonly chunkSize?: FileSystem.SizeInput | undefined
-    readonly offset?: FileSystem.SizeInput | undefined
+    readonly bytesToRead?: ByteSize.Input | undefined
+    readonly chunkSize?: number | undefined
+    readonly offset?: ByteSize.Input | undefined
     readonly contentType?: string | undefined
   }
 ): Effect.Effect<Stream, PlatformError.PlatformError, FileSystem.FileSystem> =>
   Effect.flatMap(
     FileSystem.FileSystem,
     (fs) =>
-      Effect.map(fs.stat(path), (info) =>
-        stream(
-          fs.stream(path, options),
-          options?.contentType,
-          Number(info.size)
-        ))
+      Effect.flatMap(fs.stat(path), (info) =>
+        Effect.map(fileContentLength(info.size, "file", options), (contentLength) =>
+          stream(
+            fs.stream(path, options),
+            options?.contentType,
+            contentLength
+          )))
   )
 
 /**
@@ -563,7 +598,13 @@ export const file = (
  *
  * **Details**
  *
- * The effect requires `FileSystem`, uses the provided file size as the content length, and can fail with `PlatformError`.
+ * The effect requires `FileSystem`, uses the provided file size to determine the selected content length, and can
+ * fail with `PlatformError`.
+ *
+ * Like {@link file}, this constructor validates ranges lazily and calculates the EOF-clamped length with exact
+ * bigint arithmetic. Invalid range inputs and final lengths above `Number.MAX_SAFE_INTEGER` fail with
+ * `PlatformError` / `BadArgument`. Larger sizes, offsets, and byte counts remain valid when the final length
+ * is representable as a safe integer, preserving the exact Content-Length header.
  *
  * @category constructors
  * @since 4.0.0
@@ -572,18 +613,19 @@ export const fileFromInfo = (
   path: string,
   info: FileSystem.File.Info,
   options?: {
-    readonly bytesToRead?: FileSystem.SizeInput | undefined
-    readonly chunkSize?: FileSystem.SizeInput | undefined
-    readonly offset?: FileSystem.SizeInput | undefined
+    readonly bytesToRead?: ByteSize.Input | undefined
+    readonly chunkSize?: number | undefined
+    readonly offset?: ByteSize.Input | undefined
     readonly contentType?: string | undefined
   }
 ): Effect.Effect<Stream, PlatformError.PlatformError, FileSystem.FileSystem> =>
-  Effect.map(
+  Effect.flatMap(
     FileSystem.FileSystem,
     (fs) =>
-      stream(
-        fs.stream(path, options),
-        options?.contentType,
-        Number(info.size)
-      )
+      Effect.map(fileContentLength(info.size, "fileFromInfo", options), (contentLength) =>
+        stream(
+          fs.stream(path, options),
+          options?.contentType,
+          contentLength
+        ))
   )

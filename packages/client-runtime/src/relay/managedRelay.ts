@@ -17,11 +17,13 @@ import {
   RelayExchangeDpopAccessTokenEndpoint,
   RelayGetEnvironmentStatusEndpoint,
   RelayJwtSubjectTokenType,
+  type RelayAgentActivitySnapshotResponse,
   type RelayLiveActivityRegistrationRequest,
   RelayMobileRegistrationScope,
   type RelayOkResponse,
   type RelayPublicClientId,
   RelayRegisterDeviceEndpoint,
+  RelayAgentActivitySnapshotEndpoint,
   RelayRegisterLiveActivityEndpoint,
   RelayProtectedError,
   type RelayProtectedError as RelayProtectedErrorType,
@@ -42,6 +44,7 @@ import * as SynchronizedRef from "effect/SynchronizedRef";
 import * as HttpClientError from "effect/unstable/http/HttpClientError";
 import type * as HttpMethod from "effect/unstable/http/HttpMethod";
 import * as HttpApiClient from "effect/unstable/httpapi/HttpApiClient";
+import { NETWORK_BLOCKING_HINT } from "../errors/network.ts";
 
 export interface ManagedRelayDpopProofInput {
   readonly method: HttpMethod.HttpMethod;
@@ -49,7 +52,7 @@ export interface ManagedRelayDpopProofInput {
   readonly accessToken?: string;
 }
 
-export class ManagedRelayDpopKeyLoadError extends Schema.TaggedErrorClass<ManagedRelayDpopKeyLoadError>()(
+export class ManagedRelayDpopKeyLoadError extends Schema.TaggedError<ManagedRelayDpopKeyLoadError>()(
   "ManagedRelayDpopKeyLoadError",
   {
     keyStore: Schema.Literals(["expo-secure-store", "indexed-db"]),
@@ -61,7 +64,7 @@ export class ManagedRelayDpopKeyLoadError extends Schema.TaggedErrorClass<Manage
   }
 }
 
-export class ManagedRelayDpopProofCreationError extends Schema.TaggedErrorClass<ManagedRelayDpopProofCreationError>()(
+export class ManagedRelayDpopProofCreationError extends Schema.TaggedError<ManagedRelayDpopProofCreationError>()(
   "ManagedRelayDpopProofCreationError",
   {
     method: Schema.String,
@@ -92,6 +95,7 @@ export const ManagedRelayRequestAction = Schema.Literals([
   "register relay mobile device",
   "unregister relay mobile device",
   "register relay live activity",
+  "read relay agent activity snapshot",
 ]);
 export type ManagedRelayRequestAction = typeof ManagedRelayRequestAction.Type;
 
@@ -107,22 +111,27 @@ export const ManagedRelayRequestActivity = Schema.Literals([
   "Relay mobile device registration",
   "Relay mobile device unregistration",
   "Relay Live Activity registration",
+  "Relay agent activity snapshot",
 ]);
 export type ManagedRelayRequestActivity = typeof ManagedRelayRequestActivity.Type;
 
-export class ManagedRelayRequestTimeoutError extends Schema.TaggedErrorClass<ManagedRelayRequestTimeoutError>()(
+export class ManagedRelayRequestTimeoutError extends Schema.TaggedError<ManagedRelayRequestTimeoutError>()(
   "ManagedRelayRequestTimeoutError",
   {
     activity: ManagedRelayRequestActivity,
     timeoutMs: Schema.Number,
+    // The CLIENT span's trace id. A timed-out request has no server response
+    // to take an id from, but the client span was exported, so carrying its id
+    // makes the failure searchable instead of logging `traceId: null`.
+    traceId: Schema.NullOr(Schema.String),
   },
 ) {
   override get message(): string {
-    return `${this.activity} timed out.`;
+    return `${this.activity} timed out. ${NETWORK_BLOCKING_HINT}`;
   }
 }
 
-export class ManagedRelayUrlInvalidError extends Schema.TaggedErrorClass<ManagedRelayUrlInvalidError>()(
+export class ManagedRelayUrlInvalidError extends Schema.TaggedError<ManagedRelayUrlInvalidError>()(
   "ManagedRelayUrlInvalidError",
   {
     relayUrl: Schema.String,
@@ -133,21 +142,23 @@ export class ManagedRelayUrlInvalidError extends Schema.TaggedErrorClass<Managed
   }
 }
 
-export class ManagedRelayRequestFailedError extends Schema.TaggedErrorClass<ManagedRelayRequestFailedError>()(
+export class ManagedRelayRequestFailedError extends Schema.TaggedError<ManagedRelayRequestFailedError>()(
   "ManagedRelayRequestFailedError",
   {
     action: ManagedRelayRequestAction,
+    transportFailed: Schema.optionalKey(Schema.Boolean),
     cause: Schema.Defect(),
     relayError: Schema.optional(RelayProtectedError),
     traceId: Schema.optional(Schema.String),
   },
 ) {
   override get message(): string {
-    return `Could not ${this.action}.`;
+    const message = `Could not ${this.action}.`;
+    return this.transportFailed ? `${message} ${NETWORK_BLOCKING_HINT}` : message;
   }
 }
 
-export class ManagedRelayAccessTokenScopesUnexpectedError extends Schema.TaggedErrorClass<ManagedRelayAccessTokenScopesUnexpectedError>()(
+export class ManagedRelayAccessTokenScopesUnexpectedError extends Schema.TaggedError<ManagedRelayAccessTokenScopesUnexpectedError>()(
   "ManagedRelayAccessTokenScopesUnexpectedError",
   {
     requestedScopes: Schema.Array(RelayDpopAccessTokenScope),
@@ -159,7 +170,7 @@ export class ManagedRelayAccessTokenScopesUnexpectedError extends Schema.TaggedE
   }
 }
 
-export class ManagedRelayTokenProofCreationError extends Schema.TaggedErrorClass<ManagedRelayTokenProofCreationError>()(
+export class ManagedRelayTokenProofCreationError extends Schema.TaggedError<ManagedRelayTokenProofCreationError>()(
   "ManagedRelayTokenProofCreationError",
   {
     method: Schema.String,
@@ -172,7 +183,7 @@ export class ManagedRelayTokenProofCreationError extends Schema.TaggedErrorClass
   }
 }
 
-export class ManagedRelayRequestProofCreationError extends Schema.TaggedErrorClass<ManagedRelayRequestProofCreationError>()(
+export class ManagedRelayRequestProofCreationError extends Schema.TaggedError<ManagedRelayRequestProofCreationError>()(
   "ManagedRelayRequestProofCreationError",
   {
     method: Schema.String,
@@ -286,6 +297,9 @@ export class ManagedRelayClient extends Context.Service<
       readonly clerkToken: string;
       readonly payload: RelayLiveActivityRegistrationRequest;
     }) => Effect.Effect<RelayOkResponse, ManagedRelayClientError>;
+    readonly getAgentActivitySnapshot: (input: {
+      readonly clerkToken: string;
+    }) => Effect.Effect<RelayAgentActivitySnapshotResponse, ManagedRelayClientError>;
     readonly resetTokenCache: Effect.Effect<void>;
   }
 >()("@t3tools/client-runtime/relay/managedRelay/ManagedRelayClient") {}
@@ -296,6 +310,8 @@ function relayRequestError(action: ManagedRelayRequestAction) {
   return (cause: RelayHttpRequestError): ManagedRelayClientError =>
     new ManagedRelayRequestFailedError({
       action,
+      transportFailed:
+        HttpClientError.isHttpClientError(cause) && cause.reason._tag === "TransportError",
       cause,
       ...(isRelayProtectedError(cause) ? { relayError: cause, traceId: cause.traceId } : {}),
     });
@@ -326,11 +342,18 @@ function timeoutRelayRequest(activity: ManagedRelayRequestActivity) {
       Effect.flatMap(
         Option.match({
           onNone: () =>
-            Effect.fail(
-              new ManagedRelayRequestTimeoutError({
-                activity,
-                timeoutMs: MANAGED_RELAY_REQUEST_TIMEOUT_MS,
-              }),
+            Effect.currentParentSpan.pipe(
+              Effect.map((span) => span.traceId),
+              Effect.orElseSucceed(() => null),
+              Effect.flatMap((traceId) =>
+                Effect.fail(
+                  new ManagedRelayRequestTimeoutError({
+                    activity,
+                    timeoutMs: MANAGED_RELAY_REQUEST_TIMEOUT_MS,
+                    traceId,
+                  }),
+                ),
+              ),
             ),
           onSome: Effect.succeed,
         }),
@@ -399,12 +422,14 @@ function disabledManagedRelayClient(relayUrl: string): ManagedRelayClient["Servi
     registerDevice: unavailable("clientRuntime.managedRelay.registerDevice"),
     unregisterDevice: unavailable("clientRuntime.managedRelay.unregisterDevice"),
     registerLiveActivity: unavailable("clientRuntime.managedRelay.registerLiveActivity"),
+    getAgentActivitySnapshot: unavailable("clientRuntime.managedRelay.getAgentActivitySnapshot"),
     resetTokenCache: Effect.void.pipe(
       Effect.withSpan("clientRuntime.managedRelay.resetTokenCache"),
     ),
   });
 }
 
+/** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.fn("ManagedRelayClient.make")(function* (
   options: ManagedRelayClientLayerOptions,
 ) {
@@ -445,6 +470,10 @@ export const make = Effect.fn("ManagedRelayClient.make")(function* (
     unregisterDevice: (deviceId: string): DpopProofTarget => ({
       method: RelayUnregisterDeviceEndpoint.method,
       url: urlBuilder.mobile.unregisterDevice({ params: { deviceId } }),
+    }),
+    getAgentActivitySnapshot: (): DpopProofTarget => ({
+      method: RelayAgentActivitySnapshotEndpoint.method,
+      url: urlBuilder.mobile.getAgentActivitySnapshot(),
     }),
     registerLiveActivity: (): DpopProofTarget => ({
       method: RelayRegisterLiveActivityEndpoint.method,
@@ -523,18 +552,32 @@ export const make = Effect.fn("ManagedRelayClient.make")(function* (
           expiresAtMillis: nowMillis + response.expires_in * 1_000,
         } satisfies ManagedRelayAccessTokenCacheEntry;
       }
+      const match = {
+        accountId: accountId.value,
+        clientId: options.clientId,
+        relayUrl,
+        thumbprint: input.thumbprint,
+        scopes: input.scopes,
+        nowMillis,
+      };
+      // Cache hits do not need to wait for an unrelated exchange or store write.
+      const cached = (yield* SynchronizedRef.get(cachedTokens)).find((token) =>
+        tokenMatches(token, match),
+      );
+      if (cached) {
+        yield* Effect.annotateCurrentSpan({
+          "relay.token_cache.result": "hit",
+        });
+        return cached;
+      }
       return yield* SynchronizedRef.modifyEffect(cachedTokens, (tokens) =>
         Effect.gen(function* () {
-          const activeTokens = tokens.filter((token) => token.expiresAtMillis > nowMillis + 5_000);
+          const lookupMillis = yield* Clock.currentTimeMillis;
+          const activeTokens = tokens.filter(
+            (token) => token.expiresAtMillis > lookupMillis + 5_000,
+          );
           const cached = activeTokens.find((token) =>
-            tokenMatches(token, {
-              accountId: accountId.value,
-              clientId: options.clientId,
-              relayUrl,
-              thumbprint: input.thumbprint,
-              scopes: input.scopes,
-              nowMillis,
-            }),
+            tokenMatches(token, { ...match, nowMillis: lookupMillis }),
           );
           if (cached) {
             yield* Effect.annotateCurrentSpan({
@@ -553,7 +596,7 @@ export const make = Effect.fn("ManagedRelayClient.make")(function* (
             thumbprint: input.thumbprint,
             scopes: input.scopes,
             accessToken: response.access_token,
-            expiresAtMillis: nowMillis + response.expires_in * 1_000,
+            expiresAtMillis: lookupMillis + response.expires_in * 1_000,
           };
           const nextTokens = [...activeTokens, next];
           if (options.accessTokenStore) {
@@ -686,7 +729,7 @@ export const make = Effect.fn("ManagedRelayClient.make")(function* (
     listDevices: Effect.fnUntraced(
       function* (input) {
         return yield* client.client
-          .listDevices({
+          .listDevicesV2({
             headers: bearerHeaders(input.clerkToken),
           })
           .pipe(
@@ -843,6 +886,27 @@ export const make = Effect.fn("ManagedRelayClient.make")(function* (
         );
       },
       Effect.withSpan("clientRuntime.managedRelay.unregisterDevice"),
+      withRelayClientTracing,
+    ),
+    getAgentActivitySnapshot: Effect.fnUntraced(
+      function* (input) {
+        return yield* mobileRegistrationRequest(
+          {
+            clerkToken: input.clerkToken,
+            target: dpopProofTargets.getAgentActivitySnapshot(),
+          },
+          (authorization) =>
+            client.mobile
+              .getAgentActivitySnapshot({
+                headers: dpopHeaders(authorization),
+              })
+              .pipe(
+                Effect.mapError(relayRequestError("read relay agent activity snapshot")),
+                timeoutRelayRequest("Relay agent activity snapshot"),
+              ),
+        );
+      },
+      Effect.withSpan("clientRuntime.managedRelay.getAgentActivitySnapshot"),
       withRelayClientTracing,
     ),
     registerLiveActivity: Effect.fnUntraced(

@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { type KnownTerminalSession } from "@t3tools/client-runtime/state/terminal";
+import {
+  EMPTY_TERMINAL_BUFFER_STATE,
+  type KnownTerminalSession,
+} from "@t3tools/client-runtime/state/terminal";
 import { DEFAULT_TERMINAL_ID, EnvironmentId, ThreadId } from "@t3tools/contracts";
 
 import { getTerminalLabel } from "@t3tools/shared/terminalLabels";
@@ -8,9 +11,24 @@ import { getTerminalLabel } from "@t3tools/shared/terminalLabels";
 import {
   buildTerminalMenuSessions,
   nextOpenTerminalId,
-  nextTerminalId,
+  previousLiveTerminalId,
   resolveProjectScriptTerminalId,
+  type TerminalMenuSession,
 } from "./terminalMenu";
+
+function makeMenuSession(input: {
+  readonly terminalId: string;
+  readonly status: TerminalMenuSession["status"];
+}): TerminalMenuSession {
+  return {
+    terminalId: input.terminalId,
+    cwd: null,
+    status: input.status,
+    hasRunningSubprocess: false,
+    displayLabel: getTerminalLabel(input.terminalId),
+    updatedAt: null,
+  };
+}
 
 function makeKnownSession(input: {
   readonly terminalId: string;
@@ -40,12 +58,13 @@ function makeKnownSession(input: {
             updatedAt: input.updatedAt ?? "2026-04-15T20:00:00.000Z",
           }
         : null,
-      buffer: "",
+      output: EMPTY_TERMINAL_BUFFER_STATE.output,
       status: input.status,
       error: null,
       hasRunningSubprocess: false,
       updatedAt: input.updatedAt ?? "2026-04-15T20:00:00.000Z",
       version: 1,
+      lifecycleVersion: 1,
     },
   };
 }
@@ -109,16 +128,6 @@ describe("buildTerminalMenuSessions", () => {
   });
 });
 
-describe("nextTerminalId", () => {
-  it("uses the primary id when no terminals are listed yet", () => {
-    expect(nextTerminalId([])).toBe(DEFAULT_TERMINAL_ID);
-  });
-
-  it("allocates term-2 when only the primary shell exists", () => {
-    expect(nextTerminalId([DEFAULT_TERMINAL_ID])).toBe("term-2");
-  });
-});
-
 describe("nextOpenTerminalId", () => {
   it("matches nextTerminalId when not on a terminal route", () => {
     expect(nextOpenTerminalId({ listedTerminalIds: [] })).toBe(DEFAULT_TERMINAL_ID);
@@ -141,6 +150,60 @@ describe("nextOpenTerminalId", () => {
         activeRouteTerminalId: DEFAULT_TERMINAL_ID,
       }),
     ).toBe("term-2");
+  });
+});
+
+describe("previousLiveTerminalId", () => {
+  it("returns null when no other live session remains", () => {
+    expect(
+      previousLiveTerminalId({
+        sessions: [
+          makeMenuSession({ terminalId: "term-2", status: "exited" }),
+          makeMenuSession({ terminalId: "term-3", status: "closed" }),
+        ],
+        exitedTerminalId: "term-2",
+      }),
+    ).toBe(null);
+  });
+
+  it("prefers the nearest live session below the exited id", () => {
+    expect(
+      previousLiveTerminalId({
+        sessions: [
+          makeMenuSession({ terminalId: DEFAULT_TERMINAL_ID, status: "running" }),
+          makeMenuSession({ terminalId: "term-2", status: "running" }),
+          makeMenuSession({ terminalId: "term-3", status: "exited" }),
+          makeMenuSession({ terminalId: "term-4", status: "running" }),
+        ],
+        exitedTerminalId: "term-3",
+      }),
+    ).toBe("term-2");
+  });
+
+  it("falls back to the nearest live session above when the exited id was lowest", () => {
+    expect(
+      previousLiveTerminalId({
+        sessions: [
+          makeMenuSession({ terminalId: DEFAULT_TERMINAL_ID, status: "exited" }),
+          makeMenuSession({ terminalId: "term-2", status: "starting" }),
+          makeMenuSession({ terminalId: "term-4", status: "running" }),
+        ],
+        exitedTerminalId: DEFAULT_TERMINAL_ID,
+      }),
+    ).toBe("term-2");
+  });
+
+  it("ignores dead sessions when picking the fallback", () => {
+    expect(
+      previousLiveTerminalId({
+        sessions: [
+          makeMenuSession({ terminalId: DEFAULT_TERMINAL_ID, status: "running" }),
+          makeMenuSession({ terminalId: "term-2", status: "exited" }),
+          makeMenuSession({ terminalId: "term-3", status: "exited" }),
+        ],
+        exitedTerminalId: "term-3",
+      }),
+    ).toBe(DEFAULT_TERMINAL_ID);
   });
 });
 

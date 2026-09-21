@@ -6,6 +6,7 @@ import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Record from "effect/Record";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
@@ -34,6 +35,7 @@ import {
   RelayMobileRegistrationScope,
   RelayAuthInvalidError,
   type RelayAuthInvalidReason,
+  type RelayDpopFailureReason,
   RelayEnvironmentAuth,
   RelayEnvironmentConnectNotAuthorizedError,
   RelayEnvironmentEndpointTimedOutError,
@@ -42,6 +44,7 @@ import {
   RelayEnvironmentLinkProofExpiredError,
   RelayEnvironmentLinkProofInvalidError,
   RelayEnvironmentLinkUnavailableError,
+  RelayEnvironmentLinkLimitExceededError,
   RelayEnvironmentPrincipal,
   type RelayEnvironmentConnectRequest,
   type RelayDpopAccessTokenScope,
@@ -67,6 +70,12 @@ import * as EnvironmentPublishSignatures from "../environments/EnvironmentPublis
 import * as MobileRegistrations from "../agentActivity/MobileRegistrations.ts";
 import { withSpanAttributes } from "../observability.ts";
 import * as RelayDb from "../db.ts";
+
+// Delegated thread IDs carry escaped command provenance and exceed the router's
+// default 100-character path parameter limit. Match the environment server.
+export const RELAY_HTTP_ROUTER_CONFIG = {
+  maxParamLength: 512,
+} as const;
 
 const relayCorsAllowedMethods = ["GET", "POST", "DELETE", "OPTIONS"] as const;
 const relayCorsAllowedHeaders = [
@@ -155,6 +164,47 @@ export const relayDocsRedirectRoute = HttpRouter.add(
   HttpServerResponse.redirect("/docs"),
 );
 
+// Shorter than the mobile client's 10s request timeout on purpose: when a
+// request hangs (e.g. a stuck upstream query), the client would otherwise
+// abort first, the invocation would die with the request span still open, and
+// the batched spans would never export — leaving no server-side trace at all.
+// Failing server-side first turns the hang into a completed 504 whose trace
+// contains the exact child span that stalled, and the response still carries
+// the traceparent back to the client.
+export const RELAY_REQUEST_DEADLINE_MS = 9_000;
+
+const relayRequestDeadline = <E, R>(
+  httpEffect: Effect.Effect<
+    HttpServerResponse.HttpServerResponse,
+    E,
+    HttpServerRequest.HttpServerRequest | R
+  >,
+) =>
+  httpEffect.pipe(
+    Effect.timeoutOption(Duration.millis(RELAY_REQUEST_DEADLINE_MS)),
+    Effect.flatMap(
+      Option.match({
+        onNone: () =>
+          Effect.gen(function* () {
+            const request = yield* HttpServerRequest.HttpServerRequest;
+            yield* Effect.logError("relay request exceeded deadline", {
+              "http.method": request.method,
+              "http.url": request.url,
+              "relay.request.deadline_ms": RELAY_REQUEST_DEADLINE_MS,
+            });
+            yield* Effect.annotateCurrentSpan({
+              "relay.request.deadline_exceeded": true,
+            });
+            return HttpServerResponse.jsonUnsafe(
+              { error: "relay_request_deadline_exceeded" },
+              { status: 504 },
+            );
+          }),
+        onSome: Effect.succeed,
+      }),
+    ),
+  );
+
 export const traceRelayHttpRequest = <E, R>(
   httpEffect: Effect.Effect<
     HttpServerResponse.HttpServerResponse,
@@ -164,7 +214,7 @@ export const traceRelayHttpRequest = <E, R>(
 ) =>
   // HttpMiddleware finalizes its span on the dispatcher; do not close a request-scoped exporter first.
   HttpMiddleware.tracer(
-    appendRelayTraceContextResponseHeader.pipe(Effect.andThen(httpEffect)),
+    appendRelayTraceContextResponseHeader.pipe(Effect.andThen(relayRequestDeadline(httpEffect))),
   ).pipe(Effect.ensuring(Effect.yieldNow));
 
 export const traceRelayHttpRequestWith = <E, R, LayerError, LayerRequirements>(
@@ -360,6 +410,67 @@ export const healthApi = HttpApiBuilder.group(
   }),
 );
 
+export const revokeEnvironmentLinkRecord = Effect.fn(
+  "relay.api.client.revokeEnvironmentLinkRecord",
+)(function* (input: {
+  readonly userId: string;
+  readonly environmentId: string;
+  readonly environmentPublicKey: string;
+}) {
+  const transactions = yield* RelayDb.RelayTransactions;
+  const links = yield* EnvironmentLinks.EnvironmentLinks;
+  const credentials = yield* EnvironmentCredentials.EnvironmentCredentials;
+  return yield* transactions.withTransaction(
+    Effect.gen(function* () {
+      const revoked = yield* links.revokeForUser({
+        userId: input.userId,
+        environmentId: input.environmentId,
+      });
+      if (revoked) {
+        yield* credentials.revokeForEnvironmentPublicKey({
+          environmentId: input.environmentId,
+          environmentPublicKey: input.environmentPublicKey,
+        });
+      }
+      return revoked;
+    }),
+  );
+});
+
+export const unlinkEnvironmentRecord = Effect.fn("relay.api.client.unlinkEnvironmentRecord")(
+  function* (input: { readonly userId: string; readonly environmentId: string }) {
+    const links = yield* EnvironmentLinks.EnvironmentLinks;
+    const managedEndpointProvider = yield* ManagedEndpointProvider.ManagedEndpointProvider;
+    const deprovisionTarget = yield* managedEndpointProvider.prepareDeprovision({
+      userId: input.userId,
+      environmentId: input.environmentId,
+    });
+    const link = yield* links.getForUser({
+      userId: input.userId,
+      environmentId: input.environmentId,
+    });
+    const unlinked =
+      link === null
+        ? false
+        : yield* revokeEnvironmentLinkRecord({
+            userId: input.userId,
+            environmentId: link.environmentId,
+            environmentPublicKey: link.environmentPublicKey,
+          });
+
+    // External teardown cannot share the SQL transaction. Run it only after
+    // revocation commits so a database failure leaves a fully usable active
+    // link. Still run teardown when the link is already revoked, allowing a
+    // retry to finish cleanup after an earlier Cloudflare failure.
+    yield* managedEndpointProvider.deprovision({
+      userId: input.userId,
+      environmentId: input.environmentId,
+      target: deprovisionTarget,
+    });
+    return unlinked;
+  },
+);
+
 export const mobileApi = HttpApiBuilder.group(
   RelayApi,
   "mobile",
@@ -392,6 +503,17 @@ export const mobileApi = HttpApiBuilder.group(
         }, mapRelayCommonApiErrors("invalid_dpop")),
       )
       .handle(
+        "getAgentActivitySnapshot",
+        Effect.fn("relay.api.mobile.getAgentActivitySnapshot")(function* () {
+          const { userId, token } = yield* RelayClientPrincipal;
+          const proofKeyThumbprint = yield* requireDpopPrincipalScope("mobile:registration");
+          yield* requireDpopThumbprint(proofKeyThumbprint, {
+            expectedAccessToken: token,
+          }).pipe(Effect.provideService(DpopProofs.DpopProofReplay, dpopProofs));
+          return yield* registrations.getAgentActivitySnapshot({ userId });
+        }, mapRelayCommonApiErrors("invalid_dpop")),
+      )
+      .handle(
         "unregisterDevice",
         Effect.fn("relay.api.mobile.unregisterDevice")(function* (args) {
           const { params } = args;
@@ -416,7 +538,6 @@ export const clientApi = HttpApiBuilder.group(
     const linker = yield* EnvironmentLinker.EnvironmentLinker;
     const links = yield* EnvironmentLinks.EnvironmentLinks;
     const managedEndpointProvider = yield* ManagedEndpointProvider.ManagedEndpointProvider;
-    const credentials = yield* EnvironmentCredentials.EnvironmentCredentials;
     const devices = yield* Devices.Devices;
     return handlers
       .handle(
@@ -430,6 +551,22 @@ export const clientApi = HttpApiBuilder.group(
       .handle(
         "listDevices",
         Effect.fn("relay.api.client.listDevices")(function* () {
+          yield* appendRelayCredentialResponseHeaders;
+          const { userId } = yield* RelayClientPrincipal;
+          const registered = yield* devices.listForUser({ userId });
+          return {
+            devices: registered.flatMap((device) =>
+              device.platform === "ios" && device.iosMajorVersion !== null
+                ? [{ ...device, platform: "ios" as const, iosMajorVersion: device.iosMajorVersion }]
+                : [],
+            ),
+          };
+        }, mapRelayCommonApiErrors("not_authorized")),
+      )
+      .handle(
+        "listDevicesV2",
+        Effect.fn("relay.api.client.listDevicesV2")(function* () {
+          yield* appendRelayCredentialResponseHeaders;
           const { userId } = yield* RelayClientPrincipal;
           return { devices: yield* devices.listForUser({ userId }) };
         }, mapRelayCommonApiErrors("not_authorized")),
@@ -483,6 +620,12 @@ export const clientApi = HttpApiBuilder.group(
                 reason: "origin_not_allowed",
                 traceId,
               }),
+            ManagedTunnelLimitExceeded: (limitError, traceId) =>
+              new RelayEnvironmentLinkLimitExceededError({
+                code: "environment_link_limit_exceeded",
+                maxTunnels: limitError.maxTunnels,
+                traceId,
+              }),
             EnvironmentLinkUpsertPersistenceError: (_error, traceId) =>
               new RelayEnvironmentLinkFailedError({
                 code: "environment_link_failed",
@@ -532,30 +675,34 @@ export const clientApi = HttpApiBuilder.group(
         Effect.fn("relay.api.client.unlinkEnvironment")(function* (args) {
           const { params } = args;
           const { userId } = yield* RelayClientPrincipal;
-          yield* managedEndpointProvider
-            .deprovision({
+          const unlinked = yield* unlinkEnvironmentRecord({
+            userId,
+            environmentId: params.environmentId,
+          }).pipe(
+            Effect.catchTags({
+              SqlError: () => relayInternalErrorResponse("internal_error"),
+              ManagedEndpointDeprovisioningFailed: () =>
+                relayInternalErrorResponse("upstream_unavailable"),
+            }),
+          );
+          return { ok: unlinked };
+        }, mapRelayCommonApiErrors("not_authorized")),
+      )
+      .handle(
+        "releaseEnvironmentTunnel",
+        Effect.fn("relay.api.client.releaseEnvironmentTunnel")(function* (args) {
+          const { params } = args;
+          const { userId } = yield* RelayClientPrincipal;
+          // ok mirrors whether the connector token is now dead: false means a
+          // concurrent provision kept the recorded tunnel alive, so the caller
+          // must not discard its runtime config.
+          const released = yield* managedEndpointProvider
+            .release({
               userId,
               environmentId: params.environmentId,
             })
             .pipe(Effect.catch(() => relayInternalErrorResponse("upstream_unavailable")));
-          const link = yield* links.getForUser({
-            userId,
-            environmentId: params.environmentId,
-          });
-          if (link === null) {
-            return { ok: false };
-          }
-          const unlinked = yield* links.revokeForUser({
-            userId,
-            environmentId: params.environmentId,
-          });
-          if (unlinked) {
-            yield* credentials.revokeForEnvironmentPublicKey({
-              environmentId: link.environmentId,
-              environmentPublicKey: link.environmentPublicKey,
-            });
-          }
-          return { ok: unlinked };
+          return { ok: released };
         }, mapRelayCommonApiErrors("not_authorized")),
       );
   }),
@@ -654,9 +801,10 @@ export const dpopClientApi = HttpApiBuilder.group(
           },
           mapRelayCommonApiErrors("invalid_dpop"),
           mapErrorTags({
-            EnvironmentConnectNotAuthorized: (_error, traceId) =>
+            EnvironmentConnectNotAuthorized: (error, traceId) =>
               new RelayEnvironmentConnectNotAuthorizedError({
                 code: "environment_connect_not_authorized",
+                reason: error.reason,
                 traceId,
               }),
             EnvironmentMintRequestFailed: (_error, traceId) =>
@@ -696,9 +844,10 @@ export const dpopClientApi = HttpApiBuilder.group(
           },
           mapRelayCommonApiErrors("invalid_dpop"),
           mapErrorTags({
-            EnvironmentConnectNotAuthorized: (_error, traceId) =>
+            EnvironmentConnectNotAuthorized: (error, traceId) =>
               new RelayEnvironmentConnectNotAuthorizedError({
                 code: "environment_connect_not_authorized",
+                reason: error.reason,
                 traceId,
               }),
             EnvironmentMintRequestFailed: (_error, traceId) =>
@@ -854,6 +1003,12 @@ export const serverApi = HttpApiBuilder.group(
               reason: "upstream_unavailable",
               traceId,
             }),
+          FcmDeliveryError: (_error, traceId) =>
+            new RelayInternalError({
+              code: "internal_error",
+              reason: "upstream_unavailable",
+              traceId,
+            }),
         }),
         mapRelayCommonApiErrors("not_authorized"),
       ),
@@ -861,7 +1016,7 @@ export const serverApi = HttpApiBuilder.group(
   }),
 );
 
-class ClerkTokenVerificationFailed extends Schema.TaggedErrorClass<ClerkTokenVerificationFailed>()(
+class ClerkTokenVerificationFailed extends Schema.TaggedError<ClerkTokenVerificationFailed>()(
   "ClerkTokenVerificationFailed",
   {
     cause: Schema.Defect(),
@@ -873,6 +1028,7 @@ class ClerkTokenVerificationFailed extends Schema.TaggedErrorClass<ClerkTokenVer
 }
 
 const isHttpUnauthorized = Schema.is(HttpApiError.Unauthorized);
+const isDpopProofRejected = Schema.is(DpopProofs.DpopProofRejected);
 
 const currentTraceId = Effect.currentParentSpan.pipe(
   Effect.map((span) => span.traceId),
@@ -885,7 +1041,6 @@ const RelayCommonPersistenceError = Schema.Union([
   Devices.DeviceListPersistenceError,
   LiveActivities.LiveActivityRegistrationPersistenceError,
   EnvironmentLinks.EnvironmentLinkUserListPersistenceError,
-  EnvironmentLinks.EnvironmentPublicKeyListPersistenceError,
   EnvironmentLinks.EnvironmentLinkListPersistenceError,
   EnvironmentLinks.EnvironmentLinkLookupPersistenceError,
   EnvironmentLinks.EnvironmentLinkRevokePersistenceError,
@@ -904,9 +1059,36 @@ type RelayCommonPersistenceError = typeof RelayCommonPersistenceError.Type;
 const isRelayCommonPersistenceError = Schema.is(RelayCommonPersistenceError);
 
 type MapRelayCommonApiError<E> =
-  | Exclude<E, HttpApiError.Unauthorized | RelayCommonPersistenceError>
+  | Exclude<
+      E,
+      HttpApiError.Unauthorized | DpopProofs.DpopProofRejected | RelayCommonPersistenceError
+    >
   | (Extract<E, HttpApiError.Unauthorized> extends never ? never : RelayAuthInvalidError)
+  | (Extract<E, DpopProofs.DpopProofRejected> extends never ? never : RelayAuthInvalidError)
   | (Extract<E, RelayCommonPersistenceError> extends never ? never : RelayInternalError);
+
+export function relayDpopFailureReason(
+  code: DpopProofs.DpopProofFailureCode,
+): RelayDpopFailureReason {
+  switch (code) {
+    case "time_window":
+      return "time_window";
+    case "key_mismatch":
+      return "key_mismatch";
+    case "method_mismatch":
+    case "url_mismatch":
+      return "request_mismatch";
+    case "access_token_hash_mismatch":
+      return "token_mismatch";
+    case "replayed":
+      return "replay";
+    case "missing_proof":
+    case "malformed_proof":
+    case "invalid_signature":
+    case "invalid_proof":
+      return "invalid_proof";
+  }
+}
 
 function relayInternalErrorResponse(reason: RelayInternalError["reason"]) {
   return currentTraceId.pipe(
@@ -919,11 +1101,32 @@ function relayInternalErrorResponse(reason: RelayInternalError["reason"]) {
 function mapRelayCommonApiErrors(authReason: RelayAuthInvalidReason) {
   const mapError = Effect.fnUntraced(function* <E>(error: E) {
     const traceId = yield* currentTraceId;
-    if (isHttpUnauthorized(error)) {
+    if (isDpopProofRejected(error)) {
+      yield* Effect.annotateCurrentSpan({
+        "relay.dpop.failure_code": error.code,
+      });
       return yield* Effect.fail(
         new RelayAuthInvalidError({
           code: "auth_invalid",
           reason: authReason,
+          ...(authReason === "invalid_dpop"
+            ? { dpopFailureReason: relayDpopFailureReason(error.code) }
+            : {}),
+          traceId,
+        }) as MapRelayCommonApiError<E>,
+      );
+    }
+    if (isHttpUnauthorized(error)) {
+      if (authReason === "invalid_dpop") {
+        yield* Effect.annotateCurrentSpan({
+          "relay.dpop.failure_code": "invalid_proof",
+        });
+      }
+      return yield* Effect.fail(
+        new RelayAuthInvalidError({
+          code: "auth_invalid",
+          reason: authReason,
+          ...(authReason === "invalid_dpop" ? { dpopFailureReason: "invalid_proof" } : {}),
           traceId,
         }) as MapRelayCommonApiError<E>,
       );

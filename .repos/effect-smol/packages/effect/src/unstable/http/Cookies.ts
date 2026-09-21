@@ -1,63 +1,11 @@
 /**
- * Immutable HTTP cookie values and collections for request and response
- * workflows.
+ * Models HTTP cookies and cookie collections for requests and responses.
  *
- * The module models a validated {@link Cookie}, an immutable {@link Cookies}
- * collection keyed by cookie name, and the conversions needed around HTTP
- * headers. Use it to read request `Cookie` headers, build cookies with standard
- * attributes, merge or remove cookies immutably, expire cookies, and emit
- * response `Set-Cookie` headers.
- *
- * **Mental model**
- *
- * - A `Cookie` stores both the decoded `value` and the encoded `valueEncoded`
- *   used in headers
- * - A `Cookies` collection contains at most one cookie per name; later writes,
- *   merges, and iterable inputs replace earlier cookies with the same name
- * - `Cookie` request headers carry name/value pairs, while `Set-Cookie`
- *   response headers carry one cookie plus optional attributes
- * - Safe constructors return `Result` failures for invalid names, values,
- *   domains, paths, or infinite `Max-Age` values
- *
- * **Common tasks**
- *
- * - Create cookies: {@link makeCookie}, {@link makeCookieUnsafe}
- * - Build collections: {@link empty}, {@link fromIterable},
- *   {@link fromSetCookie}, {@link fromReadonlyRecord}
- * - Read values: {@link get}, {@link getValue}, {@link toRecord},
- *   {@link isEmpty}
- * - Update collections: {@link set}, {@link setUnsafe}, {@link setAll},
- *   {@link setCookie}, {@link setAllCookie}, {@link remove}, {@link merge}
- * - Expire cookies: {@link expireCookie}, {@link expireCookieUnsafe}
- * - Encode and decode headers: {@link toCookieHeader},
- *   {@link toSetCookieHeaders}, {@link serializeCookie}, {@link parseHeader}
- *
- * **Gotchas**
- *
- * - Use {@link toCookieHeader} for an outbound request `Cookie` header and
- *   {@link toSetCookieHeaders} for response `Set-Cookie` headers.
- * - Parsing is intentionally tolerant: malformed `Set-Cookie` input can be
- *   ignored, unsupported attributes are skipped, and percent-decoding falls
- *   back to the original text.
- * - Security attributes such as `HttpOnly`, `Secure`, `SameSite`, and
- *   `Partitioned` are serialized when present, but browser policy enforces
- *   their final behavior.
- *
- * **Example** (Serializing a session cookie)
- *
- * ```ts
- * import { Cookies } from "effect/unstable/http"
- *
- * const cookies = Cookies.setUnsafe(Cookies.empty, "session", "abc123", {
- *   httpOnly: true,
- *   path: "/",
- *   sameSite: "lax",
- *   secure: true
- * })
- *
- * console.log(Cookies.toSetCookieHeaders(cookies))
- * // ["session=abc123; Path=/; HttpOnly; Secure; SameSite=Lax"]
- * ```
+ * A `Cookie` stores a name, value, encoded value, and standard cookie
+ * attributes. A `Cookies` value is an immutable collection keyed by cookie
+ * name. This module parses request `Cookie` headers, builds response
+ * `Set-Cookie` headers, and provides helpers for adding, removing, merging, and
+ * expiring cookies.
  *
  * @since 4.0.0
  */
@@ -65,13 +13,12 @@ import * as Data from "../../Data.ts"
 import * as Duration from "../../Duration.ts"
 import { dual } from "../../Function.ts"
 import * as Inspectable from "../../Inspectable.ts"
+import * as InternalRecord from "../../internal/record.ts"
 import * as Option from "../../Option.ts"
 import { type Pipeable, pipeArguments } from "../../Pipeable.ts"
 import * as Predicate from "../../Predicate.ts"
 import * as Record from "../../Record.ts"
 import * as Result from "../../Result.ts"
-import * as Schema from "../../Schema.ts"
-import * as Transformation from "../../SchemaTransformation.ts"
 import type * as Types from "../../Types.ts"
 
 const TypeId = "~effect/http/Cookies"
@@ -79,7 +26,7 @@ const TypeId = "~effect/http/Cookies"
 /**
  * Returns `true` when a value is a `Cookies` collection.
  *
- * @category refinements
+ * @category guards
  * @since 4.0.0
  */
 export const isCookies = (u: unknown): u is Cookies => Predicate.hasProperty(u, TypeId)
@@ -95,64 +42,13 @@ export interface Cookies extends Pipeable, Inspectable.Inspectable {
   readonly cookies: Record.ReadonlyRecord<string, Cookie>
 }
 
-/**
- * Schema interface for validating and encoding `Cookies` collections.
- *
- * @category schemas
- * @since 4.0.0
- */
-export interface CookiesSchema extends Schema.declare<Cookies, Record.ReadonlyRecord<string, Cookie>> {}
-
-/**
- * Schema for `Cookies` collections.
- *
- * **Details**
- *
- * JSON encoding uses `Set-Cookie` header strings, while isomorphic encoding uses
- * a readonly record of cookie values.
- *
- * @category schemas
- * @since 4.0.0
- */
-export const CookiesSchema: CookiesSchema = Schema.declare(
-  isCookies,
-  {
-    typeConstructor: {
-      _tag: "effect/http/Cookies"
-    },
-    generation: {
-      runtime: `Cookies.CookiesSchema`,
-      Type: `Cookies.Cookies`,
-      Encoded: `typeof Cookies.CookiesSchema["Encoded"]`,
-      importDeclaration: `import * as Cookies from "effect/unstable/http/Cookies"`
-    },
-    expected: "Cookies",
-    toCodecJson: () =>
-      Schema.link<Cookies>()(
-        Schema.Array(Schema.String),
-        Transformation.transform({
-          decode: (input) => fromSetCookie(input),
-          encode: (cookies) => toSetCookieHeaders(cookies)
-        })
-      ),
-    toCodecIso: () =>
-      Schema.link<Cookies>()(
-        Schema.Record(Schema.String, CookieSchema),
-        Transformation.transform({
-          decode: (input) => fromReadonlyRecord(input),
-          encode: (cookies) => cookies.cookies
-        })
-      )
-  }
-)
-
 const CookieTypeId = "~effect/http/Cookies/Cookie"
 
 /**
  * HTTP cookie value with its decoded value, encoded value, and optional cookie
  * attributes such as domain, path, expiration, security, and same-site settings.
  *
- * @category cookie
+ * @category cookies
  * @since 4.0.0
  */
 export interface Cookie extends Inspectable.Inspectable {
@@ -180,35 +76,6 @@ export interface Cookie extends Inspectable.Inspectable {
  * @since 4.0.0
  */
 export const isCookie = (u: unknown): u is Cookie => Predicate.hasProperty(u, CookieTypeId)
-
-/**
- * Schema interface for validating `Cookie` values.
- *
- * @category schemas
- * @since 4.0.0
- */
-export interface CookieSchema extends Schema.declare<Cookie> {}
-
-/**
- * Schema for `Cookie` values.
- *
- * @category schemas
- * @since 4.0.0
- */
-export const CookieSchema: CookieSchema = Schema.declare(
-  isCookie,
-  {
-    typeConstructor: {
-      _tag: "effect/http/Cookie"
-    },
-    generation: {
-      runtime: `Cookies.CookieSchema`,
-      Type: `Cookies.Cookie`,
-      importDeclaration: `import * as Cookie from "effect/unstable/http/Cookies"`
-    },
-    expected: "Cookie"
-  }
-)
 
 const CookieErrorTypeId = "~effect/http/Cookies/CookieError"
 
@@ -239,7 +106,7 @@ export class CookiesErrorReason extends Data.Error<{
  * @category errors
  * @since 4.0.0
  */
-export class CookiesError extends Data.TaggedError("CookieError")<{
+export class CookiesError extends Data.TaggedError("CookiesError")<{
   readonly reason: CookiesErrorReason
 }> {
   /**
@@ -303,7 +170,7 @@ export const fromReadonlyRecord = (cookies: Record.ReadonlyRecord<string, Cookie
 export const fromIterable = (cookies: Iterable<Cookie>): Cookies => {
   const record: Record<string, Cookie> = {}
   for (const cookie of cookies) {
-    record[cookie.name] = cookie
+    InternalRecord.assignProperty(record, cookie.name, cookie)
   }
   return fromReadonlyRecord(record)
 }
@@ -338,7 +205,7 @@ function parseSetCookie(header: string): Cookie | undefined {
     return undefined
   }
   const name = parts[0].slice(0, firstEqual)
-  if (!fieldContentRegExp.test(name)) {
+  if (!cookieNameRegExp.test(name)) {
     return undefined
   }
 
@@ -469,13 +336,17 @@ export const empty: Cookies = fromIterable([])
 /**
  * Returns `true` when the `Cookies` collection contains no cookies.
  *
- * @category refinements
+ * @category predicates
  * @since 4.0.0
  */
 export const isEmpty = (self: Cookies): boolean => Record.isEmptyRecord(self.cookies)
 
 // oxlint-disable-next-line no-control-regex
 const fieldContentRegExp = /^[\u0009\u0020-\u007e\u0080-\u00ff]+$/
+const cookieNameRegExp = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/
+// oxlint-disable-next-line no-control-regex
+const cookieDomainRegExp = /^[\u0009\u0020-\u003a\u003c-\u007e\u0080-\u00ff]+$/
+const cookiePathRegExp = /^[\u0020-\u003a\u003c-\u007e]+$/
 
 const CookieProto = {
   [CookieTypeId]: CookieTypeId,
@@ -505,26 +376,10 @@ export function makeCookie(
   value: string,
   options?: Cookie["options"] | undefined
 ): Result.Result<Cookie, CookiesError> {
-  if (!fieldContentRegExp.test(name)) {
-    return Result.fail(CookiesError.fromReason("InvalidCookieName"))
-  }
   const encodedValue = encodeURIComponent(value)
-  if (encodedValue && !fieldContentRegExp.test(encodedValue)) {
-    return Result.fail(CookiesError.fromReason("InvalidCookieValue"))
-  }
-
-  if (options !== undefined) {
-    if (options.domain !== undefined && !fieldContentRegExp.test(options.domain)) {
-      return Result.fail(CookiesError.fromReason("InvalidCookieDomain"))
-    }
-
-    if (options.path !== undefined && !fieldContentRegExp.test(options.path)) {
-      return Result.fail(CookiesError.fromReason("InvalidCookiePath"))
-    }
-
-    if (options.maxAge !== undefined && !Duration.isFinite(Duration.fromInputUnsafe(options.maxAge))) {
-      return Result.fail(CookiesError.fromReason("CookieInfinityMaxAge"))
-    }
+  const error = validateCookie(name, encodedValue, options)
+  if (error !== undefined) {
+    return Result.fail(error)
   }
 
   return Result.succeed(Object.assign(Object.create(CookieProto), {
@@ -533,6 +388,28 @@ export function makeCookie(
     valueEncoded: encodedValue,
     options
   }))
+}
+
+function validateCookie(
+  name: string,
+  encodedValue: string,
+  options: Cookie["options"] | undefined
+): CookiesError | undefined {
+  if (!cookieNameRegExp.test(name)) {
+    return CookiesError.fromReason("InvalidCookieName")
+  }
+  if (encodedValue && !fieldContentRegExp.test(encodedValue)) {
+    return CookiesError.fromReason("InvalidCookieValue")
+  }
+  if (options?.domain !== undefined && !cookieDomainRegExp.test(options.domain)) {
+    return CookiesError.fromReason("InvalidCookieDomain")
+  }
+  if (options?.path !== undefined && !cookiePathRegExp.test(options.path)) {
+    return CookiesError.fromReason("InvalidCookiePath")
+  }
+  if (options?.maxAge !== undefined && !Duration.isFinite(Duration.fromInputUnsafe(options.maxAge))) {
+    return CookiesError.fromReason("CookieInfinityMaxAge")
+  }
 }
 
 /**
@@ -578,7 +455,7 @@ export const setAllCookie: {
 } = dual(2, (self: Cookies, cookies: Iterable<Cookie>) => {
   const record = { ...self.cookies }
   for (const cookie of cookies) {
-    record[cookie.name] = cookie
+    InternalRecord.assignProperty(record, cookie.name, cookie)
   }
   return fromReadonlyRecord(record)
 })
@@ -620,7 +497,8 @@ export const get: {
   (self: Cookies, name: string): Option.Option<Cookie>
 } = dual(
   (args) => isCookies(args[0]),
-  (self: Cookies, name: string): Option.Option<Cookie> => Option.fromUndefinedOr(self.cookies[name])
+  (self: Cookies, name: string): Option.Option<Cookie> =>
+    Option.fromUndefinedOr(Object.hasOwn(self.cookies, name) ? self.cookies[name] : undefined)
 )
 
 /**
@@ -794,7 +672,7 @@ export const setAll: {
       if (Result.isFailure(result)) {
         return result as Result.Failure<never, CookiesError>
       }
-      record[name] = result.success
+      InternalRecord.assignProperty(record, name, result.success)
     }
     return Result.succeed(fromReadonlyRecord(record))
   }
@@ -828,6 +706,10 @@ export const setAllUnsafe: {
  * @since 4.0.0
  */
 export function serializeCookie(self: Cookie): string {
+  const error = validateCookie(self.name, self.valueEncoded, self.options)
+  if (error !== undefined) {
+    throw error
+  }
   let str = self.name + "=" + self.valueEncoded
 
   if (self.options === undefined) {
@@ -917,27 +799,10 @@ export const toRecord = (self: Cookies): Record<string, string> => {
   const cookies = Object.values(self.cookies)
   for (let index = 0; index < cookies.length; index++) {
     const cookie = cookies[index]
-    record[cookie.name] = cookie.value
+    InternalRecord.assignProperty(record, cookie.name, cookie.value)
   }
   return record
 }
-
-/**
- * Schema for transforming `Cookies` into records of decoded string values keyed
- * by cookie name.
- *
- * @category schemas
- * @since 4.0.0
- */
-export const schemaRecord = CookiesSchema.pipe(
-  Schema.decodeTo(
-    Schema.Record(Schema.String, Schema.String),
-    Transformation.transform({
-      decode: toRecord,
-      encode: (self) => fromIterable(Object.entries(self).map(([name, value]) => makeCookieUnsafe(name, value)))
-    })
-  )
-)
 
 /**
  * Serializes a `Cookies` collection into an array of `Set-Cookie` header values.
@@ -978,14 +843,16 @@ export function parseHeader(header: string): Record<string, string> {
     }
 
     const key = header.substring(pos, eqIdx++).trim()
-    if (result[key] === undefined) {
+    if (!Object.hasOwn(result, key)) {
       const val = header.charCodeAt(eqIdx) === 0x22
         ? header.substring(eqIdx + 1, terminatorPos - 1).trim()
         : header.substring(eqIdx, terminatorPos).trim()
 
-      result[key] = !(val.indexOf("%") === -1)
-        ? tryDecodeURIComponent(val)
-        : val
+      InternalRecord.assignProperty(
+        result,
+        key,
+        !(val.indexOf("%") === -1) ? tryDecodeURIComponent(val) : val
+      )
     }
 
     pos = terminatorPos + 1

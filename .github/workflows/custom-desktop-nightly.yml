@@ -1,4 +1,4 @@
-name: Custom Desktop Nightly
+name: Personal desktop nightly
 
 on:
   schedule:
@@ -6,76 +6,210 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: personal-desktop-nightly
+  cancel-in-progress: false
 
 jobs:
-  linux_appimage:
-    name: Linux AppImage nightly
+  preflight:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    outputs:
+      has_changes: ${{ steps.changes.outputs.has_changes }}
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+      name: ${{ steps.meta.outputs.name }}
+      ref: ${{ github.sha }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-
-      - name: Setup Vite+
-        uses: voidzero-dev/setup-vp@v1
+          persist-credentials: false
+      - uses: voidzero-dev/setup-vp@v1
         with:
           node-version-file: package.json
           cache: true
           run-install: true
-
-      - name: Ensure Electron runtime is installed
-        run: vp run --filter @t3tools/desktop ensure:electron
-
-      - name: Install ImageMagick
-        run: |
-          if ! command -v magick >/dev/null 2>&1 && ! command -v convert >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install -y imagemagick
-          fi
-
-      - id: release_meta
-        name: Resolve nightly version
+      - id: changes
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const { shouldReleaseNightly } = require("./.github/scripts/check-nightly-release.cjs");
+            core.setOutput("has_changes", String(await shouldReleaseNightly({ github, context, core })));
+      - id: meta
+        if: steps.changes.outputs.has_changes == 'true'
         env:
-          NIGHTLY_DATE: ${{ github.run_started_at }}
           NIGHTLY_SHA: ${{ github.sha }}
           NIGHTLY_RUN_NUMBER: ${{ github.run_number }}
-        run: |
-          nightly_date="$(date -u -d "$NIGHTLY_DATE" +%Y%m%d)"
-          node scripts/resolve-nightly-release.ts \
-            --date "$nightly_date" \
-            --run-number "$NIGHTLY_RUN_NUMBER" \
-            --sha "$NIGHTLY_SHA" \
-            --github-output
+        run: node scripts/resolve-nightly-release.ts --date "$(date -u +%Y%m%d)" --run-number "$NIGHTLY_RUN_NUMBER" --sha "$NIGHTLY_SHA" --github-output
 
-      - name: Build updater-enabled AppImage
+  verify:
+    needs: preflight
+    if: needs.preflight.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.preflight.outputs.ref }}
+          persist-credentials: false
+      - uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: true
+      - run: vp run --filter @t3tools/desktop ensure:electron
+      - run: vp check
+      - run: vp run typecheck
+      - run: vp run test
+
+  wsl_runtime:
+    needs: preflight
+    if: needs.preflight.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.preflight.outputs.ref }}
+          persist-credentials: false
+      - uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: true
+      - run: sudo apt-get update && sudo apt-get install -y libsecret-1-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+      - run: node scripts/update-release-package-versions.ts "${{ needs.preflight.outputs.version }}"
+      - run: vp run build:desktop
+      - name: Build Linux CLI for the Windows WSL backend
+        env:
+          VP_NODE_VERSION: "26.8.2"
+        run: node apps/server/scripts/cli.ts build-exe --verbose
+      - name: Package WSL runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --release --manifest-path native/resource-monitor/Cargo.toml --target x86_64-unknown-linux-gnu
+          mkdir -p "$RUNNER_TEMP/cli-resource-monitor/linux-x64"
+          cp native/resource-monitor/target/x86_64-unknown-linux-gnu/release/t3-resource-monitor "$RUNNER_TEMP/cli-resource-monitor/linux-x64/"
+          node scripts/build-cli-archive.ts --platform linux --arch x64 --version "${{ needs.preflight.outputs.version }}" --resource-monitor-dir "$RUNNER_TEMP/cli-resource-monitor" --output-dir wsl-runtime
+          node scripts/smoke-cli-archive.ts --archive wsl-runtime/*.tar.gz --expect-version "${{ needs.preflight.outputs.version }}"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wsl-runtime-linux-x64
+          path: wsl-runtime/*
+          if-no-files-found: error
+
+  build:
+    needs: [preflight, verify, wsl_runtime]
+    if: needs.preflight.outputs.has_changes == 'true' && needs.verify.result == 'success' && needs.wsl_runtime.result == 'success'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            runner: ubuntu-latest
+            target: AppImage
+          - platform: win
+            runner: windows-latest
+            target: nsis
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.preflight.outputs.ref }}
+          persist-credentials: false
+      - uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: true
+      - run: vp run --filter @t3tools/desktop ensure:electron
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Spectre-mitigated MSVC libs
+        if: matrix.platform == 'win'
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $installPath = & $vswhere -products * -latest -property installationPath
+          $setupExe = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\setup.exe"
+          $proc = Start-Process -FilePath $setupExe `
+            -ArgumentList "modify", "--installPath", "`"$installPath`"", "--add", `
+            "Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre", "--quiet", "--norestart" `
+            -Wait -PassThru -NoNewWindow
+          if ($null -eq $proc -or $proc.ExitCode -ne 0) {
+            $code = if ($null -ne $proc) { $proc.ExitCode } else { 1 }
+            Write-Error "Visual Studio Installer failed with exit code $code"
+            exit $code
+          }
+
+      - if: matrix.platform == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y imagemagick libsecret-1-dev pkg-config
+      - if: matrix.platform == 'win'
+        uses: actions/download-artifact@v8
+        with:
+          name: wsl-runtime-linux-x64
+          path: wsl-runtime
+      - name: Build updater-enabled artifact
+        shell: bash
         env:
           T3CODE_DESKTOP_UPDATE_REPOSITORY: ${{ github.repository }}
         run: |
-          vp run dist:desktop:artifact \
-            --platform linux \
-            --target AppImage \
-            --arch x64 \
-            --build-version "${{ steps.release_meta.outputs.version }}" \
-            --verbose
-
-      - name: Verify updater assets
+          args=(--platform "${{ matrix.platform }}" --target "${{ matrix.target }}" --arch x64 --build-version "${{ needs.preflight.outputs.version }}")
+          if [[ "${{ matrix.platform }}" == win ]]; then args+=(--wsl-runtime "$GITHUB_WORKSPACE"/wsl-runtime/t3-*-linux-x64.tar.gz); fi
+          vp run dist:desktop:artifact "${args[@]}"
+      - name: Collect and verify assets
+        shell: bash
         run: |
-          test -n "$(find release -maxdepth 1 -name '*.AppImage' -print -quit)"
-          test -n "$(find release -maxdepth 1 -name 'nightly*.yml' -print -quit)"
-
-      - name: Publish GitHub prerelease
-        uses: softprops/action-gh-release@v2
+          set -euo pipefail
+          mkdir release-publish
+          if [[ "${{ matrix.platform }}" == linux ]]; then
+            test -n "$(find release -maxdepth 1 -name '*.AppImage' -print -quit)"; test -f release/nightly-linux.yml
+            cp release/*.AppImage release/nightly-linux.yml release-publish/
+          else
+            test -n "$(find release -maxdepth 1 -name '*.exe' -print -quit)"; test -n "$(find release -maxdepth 1 -name '*.exe.blockmap' -print -quit)"; test -f release/nightly.yml
+            cp release/*.exe release/*.exe.blockmap release/nightly.yml release-publish/
+          fi
+      - uses: actions/upload-artifact@v7
         with:
-          tag_name: ${{ steps.release_meta.outputs.tag }}
-          target_commitish: ${{ github.sha }}
-          name: ${{ steps.release_meta.outputs.name }}
+          name: desktop-${{ matrix.platform }}-x64
+          path: release-publish/*
+          if-no-files-found: error
+
+  publish:
+    needs: [preflight, build]
+    if: needs.preflight.outputs.has_changes == 'true' && needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: desktop-*-x64
+          merge-multiple: true
+          path: release-assets
+      - shell: bash
+        run: |
+          test -n "$(find release-assets -maxdepth 1 -name '*.AppImage' -print -quit)"
+          test -n "$(find release-assets -maxdepth 1 -name '*.exe' -print -quit)"
+          test -n "$(find release-assets -maxdepth 1 -name '*.exe.blockmap' -print -quit)"
+          test -f release-assets/nightly-linux.yml && test -f release-assets/nightly.yml
+      - uses: softprops/action-gh-release@v2
+        with:
+          repository: ${{ github.repository }}
+          tag_name: ${{ needs.preflight.outputs.tag }}
+          target_commitish: ${{ needs.preflight.outputs.ref }}
+          name: ${{ needs.preflight.outputs.name }}
           prerelease: true
           make_latest: false
           generate_release_notes: true
           files: |
-            release/*.AppImage
-            release/*.yml
+            release-assets/*.AppImage
+            release-assets/*.exe
+            release-assets/*.exe.blockmap
+            release-assets/*.yml
           fail_on_unmatched_files: true

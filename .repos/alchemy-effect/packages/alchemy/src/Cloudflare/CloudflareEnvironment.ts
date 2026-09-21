@@ -1,22 +1,19 @@
 import * as Config from "effect/Config";
-import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
-import { getAuthProvider } from "../Auth/AuthProvider.ts";
-import { ALCHEMY_PROFILE, Profile } from "../Auth/Profile.ts";
+import { resolveProviderConfig } from "../Auth/Resolve.ts";
 import {
   CLOUDFLARE_AUTH_PROVIDER_NAME,
   type CloudflareAuthConfig,
   type CloudflareResolvedCredentials,
-} from "./Auth/AuthProvider.ts";
+} from "./Auth/AuthConfig.ts";
 
-export class CloudflareEnvironment extends Context.Service<
-  CloudflareEnvironment,
-  CloudflareResolvedCredentials
->()("Cloudflare::CloudflareEnvironment") {}
+import { CloudflareEnvironment } from "./CloudflareEnvironmentService.ts";
 
-const CLOUDFLARE_ACCOUNT_ID = Config.string("CLOUDFLARE_ACCOUNT_ID");
+export { CloudflareEnvironment } from "./CloudflareEnvironmentService.ts";
+
+const CLOUDFLARE_ACCOUNT_ID = Config.String("CLOUDFLARE_ACCOUNT_ID");
 
 export const fromEnv = () =>
   Layer.effect(
@@ -34,17 +31,13 @@ export const fromProfile = () =>
   Layer.effect(
     CloudflareEnvironment,
     Effect.gen(function* () {
-      const profile = yield* Profile;
-      const auth = yield* getAuthProvider<
+      // In CI this resolves directly from environment variables. Otherwise it
+      // reads the persisted config under the canonical provider name and only
+      // configures/persists when no local config exists.
+      const { resolve } = yield* resolveProviderConfig<
         CloudflareAuthConfig,
         CloudflareResolvedCredentials
       >(CLOUDFLARE_AUTH_PROVIDER_NAME);
-      const profileName = yield* ALCHEMY_PROFILE;
-      const ci = yield* Config.boolean("CI").pipe(Config.withDefault(false));
-      // `loadOrConfigure` reads the persisted config under the canonical
-      // provider name (`Cloudflare`); only runs `configure` (and persists the
-      // result) if no stored config exists.
-      const config = yield* profile.loadOrConfigure(auth, profileName, { ci });
-      return yield* auth.read(profileName, config as CloudflareAuthConfig);
+      return yield* resolve.pipe(Effect.orDie, Effect.cached);
     }),
   );

@@ -3,99 +3,182 @@ name: CI
 on:
   pull_request:
   push:
-    branches:
-      - main
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   check:
-    name: Check
-    runs-on: blacksmith-8vcpu-ubuntu-2404
-    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Setup Vite+
-        uses: voidzero-dev/setup-vp@v1
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: voidzero-dev/setup-vp@v1
         with:
           node-version-file: package.json
           cache: true
           run-install: true
-
-      - name: Ensure Electron runtime is installed
-        run: vp run --filter @t3tools/desktop ensure:electron
-
-      - name: Check
-        run: vp check
-
-      - name: Typecheck
-        run: vpr typecheck
-
-      - name: Build desktop pipeline
-        run: vp run build:desktop
-
-      - name: Verify preload bundle output
-        run: |
-          test -f apps/desktop/dist-electron/preload.cjs
-          grep -nE "desktopBridge|getLocalEnvironmentBootstrap|PICK_FOLDER_CHANNEL|wsUrl" apps/desktop/dist-electron/preload.cjs
-          grep -n "__clerk_internal_electron_passkeys" apps/desktop/dist-electron/preload.cjs
+      - run: sudo apt-get update && sudo apt-get install -y libsecret-1-dev pkg-config
+      - run: vp run --filter @t3tools/desktop ensure:electron
+      - run: vp check
+      - run: vp run typecheck
+      - run: vp run build:desktop
 
   test:
-    name: Test
-    runs-on: blacksmith-8vcpu-ubuntu-2404
-    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Setup Vite+
-        uses: voidzero-dev/setup-vp@v1
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: voidzero-dev/setup-vp@v1
         with:
           node-version-file: package.json
           cache: true
           run-install: true
+      - run: sudo apt-get update && sudo apt-get install -y libsecret-1-dev pkg-config
+      - run: vp run --filter @t3tools/desktop ensure:electron
+      - run: vp run test
+      - run: python3 .github/scripts/stage-preview-bundle.test.py
 
-      - name: Ensure Electron runtime is installed
-        run: vp run --filter @t3tools/desktop ensure:electron
-
-      - name: Test
-        run: vp run test
-
-  mobile_native_static_analysis:
-    name: Mobile Native Static Analysis
-    runs-on: blacksmith-12vcpu-macos-26
-    timeout-minutes: 10
+  desktop_installer:
+    name: Desktop installer (${{ matrix.platform }})
+    needs: [preview_metadata, wsl_runtime]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            runner: ubuntu-latest
+            target: AppImage
+          - platform: win
+            runner: windows-latest
+            target: nsis
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Setup Vite+
-        uses: voidzero-dev/setup-vp@v1
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: voidzero-dev/setup-vp@v1
         with:
           node-version-file: package.json
           cache: true
           run-install: true
+      - run: vp run --filter @t3tools/desktop ensure:electron
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Spectre-mitigated MSVC libs
+        if: matrix.platform == 'win'
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $installPath = & $vswhere -products * -latest -property installationPath
+          $setupExe = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\setup.exe"
+          $proc = Start-Process -FilePath $setupExe `
+            -ArgumentList "modify", "--installPath", "`"$installPath`"", "--add", `
+            "Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre", "--quiet", "--norestart" `
+            -Wait -PassThru -NoNewWindow
+          if ($null -eq $proc -or $proc.ExitCode -ne 0) {
+            $code = if ($null -ne $proc) { $proc.ExitCode } else { 1 }
+            Write-Error "Visual Studio Installer failed with exit code $code"
+            exit $code
+          }
 
-      - name: Install mobile native static analysis tools
-        run: brew bundle install --file apps/mobile/Brewfile
+      - if: matrix.platform == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y imagemagick libsecret-1-dev pkg-config
+      - if: matrix.platform == 'win'
+        uses: actions/download-artifact@v8
+        with:
+          name: wsl-runtime-linux-x64
+          path: wsl-runtime
+      - name: Build installer
+        shell: bash
+        env:
+          T3CODE_DESKTOP_UPDATE_REPOSITORY: ${{ github.repository }}
+        run: |
+          args=(--platform "${{ matrix.platform }}" --target "${{ matrix.target }}" --arch x64)
+          args+=(--build-version "${{ needs.preview_metadata.outputs.version }}")
+          if [[ "${{ matrix.platform }}" == win ]]; then args+=(--wsl-runtime "$GITHUB_WORKSPACE"/wsl-runtime/t3-*-linux-x64.tar.gz); fi
+          vp run dist:desktop:artifact "${args[@]}"
+      - name: Verify installer output
+        shell: bash
+        run: |
+          if [[ "${{ matrix.platform }}" == linux ]]; then
+            test -n "$(find release -maxdepth 1 -name '*.AppImage' -print -quit)"
+            test -f release/nightly-linux.yml
+          else
+            test -n "$(find release -maxdepth 1 -name '*.exe' -print -quit)"
+            test -n "$(find release -maxdepth 1 -name '*.exe.blockmap' -print -quit)"
+            test -f release/nightly.yml
+          fi
+      - name: Upload preview updater assets
+        uses: actions/upload-artifact@v7
+        with:
+          name: desktop-preview-${{ matrix.platform }}-x64
+          path: |
+            release/*.AppImage
+            release/*.exe
+            release/*.exe.blockmap
+            release/nightly*.yml
+          if-no-files-found: error
 
-      - name: Lint mobile native sources
-        run: vp run lint:mobile
-
-  release_smoke:
-    name: Release Smoke
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+  preview_metadata:
+    runs-on: ubuntu-latest
     timeout-minutes: 10
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Setup Vite+
-        uses: voidzero-dev/setup-vp@v1
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: voidzero-dev/setup-vp@v1
         with:
           node-version-file: package.json
           cache: true
           run-install: true
+      - id: meta
+        shell: bash
+        env:
+          NIGHTLY_SHA: ${{ github.sha }}
+          NIGHTLY_RUN_NUMBER: ${{ github.run_number }}
+        run: node scripts/resolve-nightly-release.ts --date "$(date -u +%Y%m%d)" --run-number "$NIGHTLY_RUN_NUMBER" --sha "$NIGHTLY_SHA" --github-output
 
-      - name: Exercise release-only workflow steps
-        run: node scripts/release-smoke.ts
+  wsl_runtime:
+    needs: preview_metadata
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: true
+      - run: sudo apt-get update && sudo apt-get install -y libsecret-1-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+      - run: node scripts/update-release-package-versions.ts "${{ needs.preview_metadata.outputs.version }}"
+      - run: vp run build:desktop
+      - name: Build Linux CLI for the Windows WSL backend
+        env:
+          VP_NODE_VERSION: "26.8.2"
+        run: node apps/server/scripts/cli.ts build-exe --verbose
+      - name: Package WSL runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --release --manifest-path native/resource-monitor/Cargo.toml --target x86_64-unknown-linux-gnu
+          mkdir -p "$RUNNER_TEMP/cli-resource-monitor/linux-x64"
+          cp native/resource-monitor/target/x86_64-unknown-linux-gnu/release/t3-resource-monitor "$RUNNER_TEMP/cli-resource-monitor/linux-x64/"
+          node scripts/build-cli-archive.ts --platform linux --arch x64 --version "${{ needs.preview_metadata.outputs.version }}" --resource-monitor-dir "$RUNNER_TEMP/cli-resource-monitor" --output-dir wsl-runtime
+          node scripts/smoke-cli-archive.ts --archive wsl-runtime/*.tar.gz --expect-version "${{ needs.preview_metadata.outputs.version }}"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wsl-runtime-linux-x64
+          path: wsl-runtime/*
+          if-no-files-found: error

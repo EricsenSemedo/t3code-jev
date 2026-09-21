@@ -1,0 +1,9 @@
+reviews:
+  request_changes_workflow: true
+  review_status: false
+  auto_review:
+    enabled: true
+  path_filters:
+    # Vendored read-only reference checkouts of upstream Effect and Alchemy
+    # (see scripts/lib/reference-repos.ts). Nothing imports from them.
+    - "!.repos/**"

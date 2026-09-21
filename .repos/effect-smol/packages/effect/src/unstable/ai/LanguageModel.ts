@@ -1,52 +1,13 @@
 /**
- * The `LanguageModel` module provides AI text generation capabilities with tool
- * calling support.
+ * Defines the shared service for language model providers.
  *
- * This module offers a comprehensive interface for interacting with large
- * language models, supporting both streaming and non-streaming text generation,
- * structured output generation, and tool calling functionality. It provides a
- * unified API that can be implemented by different AI providers while
- * maintaining type safety and effect management.
- *
- * **Example** (Generating text)
- *
- * ```ts
- * import { Effect } from "effect"
- * import { LanguageModel } from "effect/unstable/ai"
- *
- * // Basic text generation
- * const program = Effect.gen(function*() {
- *   const response = yield* LanguageModel.generateText({
- *     prompt: "Explain quantum computing"
- *   })
- *
- *   console.log(response.text)
- *
- *   return response
- * })
- * ```
- *
- * **Example** (Generating structured output)
- *
- * ```ts
- * import { Effect, Schema } from "effect"
- * import { LanguageModel } from "effect/unstable/ai"
- *
- * // Structured output generation
- * const ContactSchema = Schema.Struct({
- *   name: Schema.String,
- *   email: Schema.String
- * })
- *
- * const extractContact = Effect.gen(function*() {
- *   const response = yield* LanguageModel.generateObject({
- *     prompt: "Extract contact: John Doe, john@example.com",
- *     schema: ContactSchema
- *   })
- *
- *   return response.value
- * })
- * ```
+ * The `LanguageModel` service lets application code ask for generated text,
+ * streamed text, or structured output without depending on a specific provider.
+ * Requests can include tools, and the service can resolve tool calls while the
+ * model is generating a response. This module contains the service contract,
+ * request and response types, structured-output support, and the constructor
+ * used by provider packages to adapt their own generate and stream functions to
+ * the shared interface.
  *
  * @since 4.0.0
  */
@@ -59,9 +20,9 @@ import type * as JsonSchema from "../../JsonSchema.ts"
 import * as Option from "../../Option.ts"
 import * as Predicate from "../../Predicate.ts"
 import * as Queue from "../../Queue.ts"
-import { CurrentConcurrency } from "../../References.ts"
 import * as Schema from "../../Schema.ts"
-import * as AST from "../../SchemaAST.ts"
+import * as SchemaAST from "../../SchemaAST.ts"
+import * as Semaphore from "../../Semaphore.ts"
 import * as Sink from "../../Sink.ts"
 import * as Stream from "../../Stream.ts"
 import type { Span } from "../../Tracer.ts"
@@ -77,23 +38,26 @@ import { CurrentSpanTransformer } from "./Telemetry.ts"
 import type * as Tool from "./Tool.ts"
 import * as Toolkit from "./Toolkit.ts"
 
-// =============================================================================
-// Service Definition
-// =============================================================================
-
 /**
- * Service tag for AI model services.
- *
- * **When to use**
- *
- * Use to access or provide text generation, streaming generation, structured
- * output, and tool-calling capabilities through the Effect context.
+ * Service key for text generation, structured output, and tool calls.
  *
  * **Example** (Accessing the language model service)
  *
- * ```ts
- * import { Effect } from "effect"
+ * ```ts import.meta.vitest
+ * import { Effect, Layer, Stream } from "effect"
  * import { LanguageModel } from "effect/unstable/ai"
+ *
+ * const FakeLanguageModel = Layer.effect(
+ *   LanguageModel.LanguageModel,
+ *   LanguageModel.make({
+ *     generateText: () =>
+ *       Effect.succeed([{
+ *         type: "text",
+ *         text: "Machine learning finds patterns in data."
+ *       }]),
+ *     streamText: () => Stream.empty
+ *   })
+ * )
  *
  * const program = Effect.gen(function*() {
  *   const model = yield* LanguageModel.LanguageModel
@@ -102,22 +66,42 @@ import * as Toolkit from "./Toolkit.ts"
  *   })
  *   return response.text
  * })
+ *
+ * await Effect.runPromise(program.pipe(Effect.provide(FakeLanguageModel))) // => "Machine learning finds patterns in data."
  * ```
  *
- * @category tags
+ * @category services
  * @since 4.0.0
  */
-export class LanguageModel extends Context.Service<LanguageModel, Service>()(
+export const LanguageModel: Context.Service<LanguageModel, LanguageModel> = Context.Service(
   "effect/unstable/ai/LanguageModel"
-) {}
+)
 
 /**
- * The service interface for language model operations, defining the contract that all language model implementations must fulfill.
+ * Brand type for `LanguageModel`.
+ *
+ * @category type IDs
+ * @since 4.0.0
+ */
+export type TypeId = "~effect/ai/LanguageModel"
+
+/**
+ * Brand for `LanguageModel` implementations.
+ *
+ * @category type IDs
+ * @since 4.0.0
+ */
+export const TypeId: TypeId = "~effect/ai/LanguageModel"
+
+/**
+ * Text generation, streaming, and structured output operations.
  *
  * @category models
  * @since 4.0.0
  */
-export interface Service {
+export interface LanguageModel {
+  readonly [TypeId]: TypeId
+
   /**
    * Generate text using the language model.
    */
@@ -140,7 +124,7 @@ export interface Service {
     >(
       options: Options & GenerateTextOptions<Tools> & { readonly toolkit: ToolkitInput<Tools> }
     ): Effect.Effect<
-      GenerateTextResponse<Tools>,
+      GenerateTextResponse<Tools, ExtractToolParametersMode<Options>>,
       ExtractError<Options>,
       ExtractServices<Options>
     >
@@ -152,7 +136,7 @@ export interface Service {
     >(
       options: Options & GenerateTextOptions<ExtractTools<Options>> & { readonly toolkit: Options["toolkit"] }
     ): Effect.Effect<
-      GenerateTextResponse<ExtractTools<Options>>,
+      GenerateTextResponse<ExtractTools<Options>, ExtractToolParametersMode<Options>>,
       ExtractError<Options>,
       ExtractServices<Options>
     >
@@ -172,7 +156,7 @@ export interface Service {
   >(
     options: Options & GenerateObjectOptions<Tools, StructuredOutputSchema>
   ) => Effect.Effect<
-    GenerateObjectResponse<Tools, StructuredOutputSchema["Type"]>,
+    GenerateObjectResponse<Tools, StructuredOutputSchema["Type"], ExtractToolParametersMode<Options>>,
     ExtractError<Options>,
     ExtractServices<Options> | StructuredOutputSchema["DecodingServices"]
   >
@@ -199,7 +183,7 @@ export interface Service {
     >(
       options: Options & GenerateTextOptions<Tools> & { readonly toolkit: ToolkitInput<Tools> }
     ): Stream.Stream<
-      Response.StreamPart<Tools>,
+      Response.StreamPart<Tools, ExtractToolParametersMode<Options>>,
       ExtractError<Options>,
       ExtractServices<Options>
     >
@@ -211,7 +195,7 @@ export interface Service {
     >(
       options: Options & GenerateTextOptions<ExtractTools<Options>> & { readonly toolkit: Options["toolkit"] }
     ): Stream.Stream<
-      Response.StreamPart<ExtractTools<Options>>,
+      Response.StreamPart<ExtractTools<Options>, ExtractToolParametersMode<Options>>,
       ExtractError<Options>,
       ExtractServices<Options>
     >
@@ -225,13 +209,16 @@ export interface Service {
  *
  * Different language model providers have varying constraints on the JSON
  * schemas they accept. A `CodecTransformer` rewrites a codec's encoded side to
- * satisfy those constraints while preserving the decoded type.
+ * satisfy those constraints while preserving the decoded type. A provider
+ * schema may be less restrictive than the codec when the provider cannot
+ * express every constraint; the returned codec remains authoritative for
+ * validating model output.
  *
- * @category models
+ * @category utility types
  * @since 4.0.0
  */
-export type CodecTransformer = <T, E, RD, RE>(schema: Schema.Codec<T, E, RD, RE>) => {
-  readonly codec: Schema.Codec<T, unknown, RD, RE>
+export type CodecTransformer = <T, E, RD, RE>(schema: Schema.ConstraintCodec<T, E, RD, RE>) => {
+  readonly codec: Schema.ConstraintCodec<T, unknown, RD, RE>
   readonly jsonSchema: JsonSchema.JsonSchema
 }
 
@@ -261,7 +248,7 @@ export const defaultCodecTransformer: CodecTransformer = InternalCodecTransforme
 /**
  * Configuration options for text generation.
  *
- * @category models
+ * @category options
  * @since 4.0.0
  */
 export interface GenerateTextOptions<Tools extends Record<string, Tool.Any>> {
@@ -319,7 +306,7 @@ type GenerateTextOptionsWithoutToolkit = Omit<GenerateTextOptions<{}>, "toolkit"
 /**
  * Configuration options for structured object generation.
  *
- * @category models
+ * @category options
  * @since 4.0.0
  */
 export interface GenerateObjectOptions<
@@ -373,30 +360,26 @@ export type ToolChoice<ToolName extends string> =
  *
  * **Example** (Inspecting a text response)
  *
- * ```ts
- * import { Effect } from "effect"
- * import { LanguageModel } from "effect/unstable/ai"
+ * ```ts import.meta.vitest
+ * import { LanguageModel, Response } from "effect/unstable/ai"
  *
- * const program = Effect.gen(function*() {
- *   const response = yield* LanguageModel.generateText({
- *     prompt: "Explain photosynthesis"
- *   })
+ * const response = new LanguageModel.GenerateTextResponse([
+ *   Response.makePart("text", { text: "Plants convert light into energy." })
+ * ])
  *
- *   console.log(response.text) // Generated text content
- *   console.log(response.finishReason) // "stop", "length", etc.
- *   console.log(response.usage) // Usage information
- *
- *   return response
- * })
+ * const result = [response.text, response.finishReason] // => ["Plants convert light into energy.", "unknown"]
  * ```
  *
  * @category models
  * @since 4.0.0
  */
-export class GenerateTextResponse<Tools extends Record<string, Tool.Any>> {
-  readonly content: Array<Response.Part<Tools>>
+export class GenerateTextResponse<
+  Tools extends Record<string, Tool.Any>,
+  ParametersMode extends Response.ToolParametersMode = "decoded"
+> {
+  readonly content: Array<Response.Part<Tools, ParametersMode>>
 
-  constructor(content: Array<Response.Part<Tools>>) {
+  constructor(content: Array<Response.Part<Tools, ParametersMode>>) {
     this.content = content
   }
 
@@ -436,7 +419,7 @@ export class GenerateTextResponse<Tools extends Record<string, Tool.Any>> {
   /**
    * Returns all tool call parts from the response.
    */
-  get toolCalls(): Array<Response.ToolCallParts<Tools>> {
+  get toolCalls(): Array<Response.ToolCallParts<Tools, ParametersMode>> {
     return this.content.filter((part) => part.type === "tool-call")
   }
 
@@ -484,26 +467,16 @@ export class GenerateTextResponse<Tools extends Record<string, Tool.Any>> {
  *
  * **Example** (Inspecting an object response)
  *
- * ```ts
- * import { Effect, Schema } from "effect"
- * import { LanguageModel } from "effect/unstable/ai"
+ * ```ts import.meta.vitest
+ * import { LanguageModel, Response } from "effect/unstable/ai"
  *
- * const UserSchema = Schema.Struct({
- *   name: Schema.String,
- *   email: Schema.String
- * })
+ * const response = new LanguageModel.GenerateObjectResponse(
+ *   { name: "John Doe", email: "john@example.com" },
+ *   [Response.makePart("text", { text: '{"name":"John Doe","email":"john@example.com"}' })]
+ * )
  *
- * const program = Effect.gen(function*() {
- *   const response = yield* LanguageModel.generateObject({
- *     prompt: "Create user: John Doe, john@example.com",
- *     schema: UserSchema
- *   })
- *
- *   console.log(response.value) // { name: "John Doe", email: "john@example.com" }
- *   console.log(response.text) // Raw generated text
- *
- *   return response.value
- * })
+ * response.value // => { name: "John Doe", email: "john@example.com" }
+ * response.text // => '{"name":"John Doe","email":"john@example.com"}'
  * ```
  *
  * @category models
@@ -511,14 +484,15 @@ export class GenerateTextResponse<Tools extends Record<string, Tool.Any>> {
  */
 export class GenerateObjectResponse<
   Tools extends Record<string, Tool.Any>,
-  A
-> extends GenerateTextResponse<Tools> {
+  A,
+  ParametersMode extends Response.ToolParametersMode = "decoded"
+> extends GenerateTextResponse<Tools, ParametersMode> {
   /**
    * The parsed structured object that conforms to the provided schema.
    */
   readonly value: A
 
-  constructor(value: A, content: Array<Response.Part<Tools>>) {
+  constructor(value: A, content: Array<Response.Part<Tools, ParametersMode>>) {
     super(content)
     this.value = value
   }
@@ -592,6 +566,18 @@ export type ExtractTools<Options> = Options extends {
 } ? ExtractToolsFromToolkitOption<Exclude<ToolkitValue, undefined>>
   : {}
 
+/**
+ * Resolves to `"encoded"` when tool call resolution is
+ * disabled, otherwise `"opaque"`.
+ *
+ * @category utility types
+ * @since 4.0.0
+ */
+export type ExtractToolParametersMode<Options> = Options extends {
+  readonly disableToolCallResolution: true
+} ? "encoded"
+  : "opaque"
+
 type ExtractErrorFromToolkitOption<ToolkitValue, DisableToolCallResolution extends boolean> = ToolkitValue extends
   Toolkit.WithHandler<infer Tools> ?
     | AiError.AiError
@@ -606,6 +592,7 @@ type ExtractErrorFromToolkitOption<ToolkitValue, DisableToolCallResolution exten
 type ExtractServicesFromToolkitOption<ToolkitValue> = ToolkitValue extends Toolkit.WithHandler<infer Tools> ?
     | Tool.HandlerServices<Tools[keyof Tools]>
     | Tool.ResultDecodingServices<Tools[keyof Tools]>
+    | Tool.ParametersEncodingServices<Tools[keyof Tools]>
   : ToolkitValue extends Effect.Effect<
     Toolkit.WithHandler<infer Tools>,
     infer _E,
@@ -613,7 +600,20 @@ type ExtractServicesFromToolkitOption<ToolkitValue> = ToolkitValue extends Toolk
   > ?
       | Tool.HandlerServices<Tools[keyof Tools]>
       | Tool.ResultDecodingServices<Tools[keyof Tools]>
+      | Tool.ParametersEncodingServices<Tools[keyof Tools]>
       | R
+  : never
+
+// Disabled resolution needs parameter encoding but not handlers or result
+// decoding. Match Toolkit before Effect to omit its handler requirement.
+type ExtractDisabledResolutionServicesFromToolkitOption<ToolkitValue> = ToolkitValue extends
+  Toolkit.WithHandler<infer Tools> ? Tool.ParametersEncodingServices<Tools[keyof Tools]>
+  : ToolkitValue extends Toolkit.Toolkit<infer Tools> ? Tool.ParametersEncodingServices<Tools[keyof Tools]>
+  : ToolkitValue extends Effect.Effect<
+    Toolkit.WithHandler<infer Tools>,
+    infer _E,
+    infer R
+  > ? Tool.ParametersEncodingServices<Tools[keyof Tools]> | R
   : never
 
 type ExtractToolkitResolutionError<ToolkitValue> = ToolkitValue extends Effect.Effect<
@@ -665,10 +665,13 @@ export type ExtractError<Options> = Options extends {
  */
 export type ExtractServices<Options> = Options extends {
   readonly disableToolCallResolution: true
-} ? never
+} ? Options extends {
+    readonly toolkit: infer ToolkitValue
+  } ? ExtractDisabledResolutionServicesFromToolkitOption<Exclude<ToolkitValue, undefined>>
+  : never
   : Options extends {
-    readonly toolkit: infer Toolkit
-  } ? ExtractServicesFromToolkitOption<Exclude<Toolkit, undefined>>
+    readonly toolkit: infer ToolkitValue
+  } ? ExtractServicesFromToolkitOption<Exclude<ToolkitValue, undefined>>
   : never
 
 // =============================================================================
@@ -684,7 +687,7 @@ export type ExtractServices<Options> = Options extends {
  * underlying provider implementation, regardless of the specific provider being
  * used.
  *
- * @category models
+ * @category options
  * @since 4.0.0
  */
 export interface ProviderOptions {
@@ -758,8 +761,9 @@ export interface ProviderOptions {
  *
  * **When to use**
  *
- * Use to build a `LanguageModel.Service` from provider-specific final and
- * streaming text generation functions.
+ * Use when you are implementing a provider adapter and need to expose the
+ * standard language-model service while keeping provider-specific request hooks
+ * behind it.
  *
  * **Details**
  *
@@ -776,7 +780,7 @@ export interface ProviderOptions {
  * response format prepared in `ProviderOptions`; invalid parts fail decoding as
  * `AiError.InvalidOutputError`.
  *
- * @see {@link Service} for the returned service contract
+ * @see {@link LanguageModel} for the returned service contract
  * @see {@link ProviderOptions} for the normalized options passed to provider hooks
  * @see {@link defaultCodecTransformer} for the default structured-output schema transformer
  *
@@ -803,7 +807,7 @@ export const make: (params: {
    * for structured output generation.
    */
   readonly codecTransformer?: CodecTransformer | undefined
-}) => Effect.Effect<Service> = Effect.fnUntraced(function*(params) {
+}) => Effect.Effect<LanguageModel> = Effect.fnUntraced(function*(params) {
   const codecTransformer = params.codecTransformer ?? defaultCodecTransformer
 
   const parentSpanTransformer = yield* Effect.serviceOption(
@@ -882,7 +886,7 @@ export const make: (params: {
   >(
     options: Options & GenerateObjectOptions<Tools, StructuredOutputSchema>
   ): Effect.Effect<
-    GenerateObjectResponse<Tools, StructuredOutputSchema["Type"]>,
+    GenerateObjectResponse<Tools, StructuredOutputSchema["Type"], ExtractToolParametersMode<Options>>,
     ExtractError<Options>,
     ExtractServices<Options> | StructuredOutputSchema["DecodingServices"]
   > => {
@@ -1042,6 +1046,8 @@ export const make: (params: {
   ) {
     const tracker = Option.getOrUndefined(yield* Effect.serviceOption(ResponseIdTracker.ResponseIdTracker))
     const toolChoice = options.toolChoice ?? "auto"
+    const concurrency = options.concurrency ?? "unbounded"
+    providerOptions.span.attribute("concurrency", concurrency)
 
     const generateWithNonIncrementalFallback = () => {
       const requestOptions: ProviderOptions = {
@@ -1142,6 +1148,7 @@ export const make: (params: {
     }
 
     // Pre-resolve pending tool approvals before calling the LLM
+    let preResolvedResults: Array<Response.ToolResultPart<string, unknown, unknown>> = []
     if (hasPendingApprovals) {
       for (const approval of approved) {
         if (approval.toolCall && !toolkit.tools[approval.toolCall.name]) {
@@ -1159,15 +1166,15 @@ export const make: (params: {
       const approvedResults = yield* executeApprovedToolCalls(
         approved,
         toolkit,
-        options.concurrency
+        concurrency
       )
       const deniedResults = createDenialResults(denied)
-      const preResolvedResults = [...approvedResults, ...deniedResults]
+      preResolvedResults = [...approvedResults, ...deniedResults]
 
       if (preResolvedResults.length > 0) {
         providerOptions.prompt = Prompt.fromMessages([
           ...providerOptions.prompt.content,
-          Prompt.makeMessage("tool", { content: preResolvedResults })
+          ...Prompt.fromResponseParts(preResolvedResults).content
         ])
       }
     }
@@ -1201,10 +1208,11 @@ export const make: (params: {
       }
     }
 
-    // Construct the response schema with the tools from the toolkit
-    const ResponseSchema = Schema.mutable(
-      Schema.Array(Response.Part(toolkit))
-    )
+    const ResponseSchema = Schema.mutable(Schema.Array(Response.Part(
+      options.disableToolCallResolution === true
+        ? makeToolkitWithEncodedParameters(toolkit)
+        : makeToolkitWithOpaqueParameters(toolkit)
+    )))
 
     // If tool call resolution is disabled, return the response without
     // resolving the tool calls that were generated
@@ -1217,27 +1225,40 @@ export const make: (params: {
           tracker.markParts(providerOptions.prompt.content, responseMetadata.id)
         }
       }
-      return content as Array<Response.Part<Tools>>
+      return [...preResolvedResults, ...content] as Array<Response.Part<Tools>>
     }
 
     const rawContent = yield* generateWithNonIncrementalFallback()
 
-    // Resolve the generated tool calls
-    const toolResults = yield* resolveToolCalls(
-      rawContent,
-      toolkit,
-      providerOptions.prompt.content,
-      options.concurrency
-    ).pipe(
-      Stream.filter(
-        (result) =>
-          result.type === "tool-approval-request" ||
-          result.preliminary === false
-      ),
-      Stream.runCollect
-    )
-
+    // Validate before running tool handlers.
     const content = yield* Schema.decodeEffect(ResponseSchema)(rawContent)
+    yield* validateProviderExecutedToolCalls(toolkit, rawContent)
+
+    // Resolve the generated tool calls. When the finish reason indicates an
+    // incomplete response, handlers do not run and every executable tool call
+    // gets a synthesized failure result instead.
+    const incompleteFinishReason = findIncompleteFinishReason(rawContent)
+    const toolResults = incompleteFinishReason !== undefined
+      ? rawContent
+        .filter((part): part is Response.ToolCallPartEncoded =>
+          part.type === "tool-call" &&
+          part.providerExecuted !== true &&
+          toolkit.tools[part.name] !== undefined
+        )
+        .map((part) => makeInterruptedToolResult(part, incompleteFinishReason) as ToolResolutionResult<Tools>)
+      : yield* resolveToolCalls(
+        rawContent,
+        toolkit,
+        providerOptions.prompt.content,
+        concurrency
+      ).pipe(
+        Stream.filter(
+          (result) =>
+            result.type === "tool-approval-request" ||
+            result.preliminary === false
+        ),
+        Stream.runCollect
+      )
 
     if (tracker) {
       const responseMetadata = content.find((part) => part.type === "response-metadata")
@@ -1246,8 +1267,8 @@ export const make: (params: {
       }
     }
 
-    // Return the content merged with the tool call results
-    return [...content, ...toolResults] as Array<Response.Part<Tools>>
+    // Retain pre-resolved results so Chat can recognize completed approvals on later turns.
+    return [...preResolvedResults, ...content, ...toolResults] as Array<Response.Part<Tools>>
   })
 
   const streamContent: <
@@ -1277,6 +1298,8 @@ export const make: (params: {
   ) {
     const tracker = Option.getOrUndefined(yield* Effect.serviceOption(ResponseIdTracker.ResponseIdTracker))
     const toolChoice = options.toolChoice ?? "auto"
+    const concurrency = options.concurrency ?? "unbounded"
+    providerOptions.span.attribute("concurrency", concurrency)
 
     const streamWithNonIncrementalFallback = () => {
       const requestOptions: ProviderOptions = {
@@ -1289,9 +1312,21 @@ export const make: (params: {
         incrementalPrompt: undefined,
         previousResponseId: undefined
       }
+      // Only response parts with content count as emitted - a lone
+      // response-metadata part must not disable the full-prompt fallback.
+      let emitted = false
       return requestOptions.incrementalPrompt
         ? params.streamText(requestOptions).pipe(
-          Stream.catchReason("AiError", "InvalidRequestError", (_) => params.streamText(fallbackOptions))
+          Stream.tap((part) =>
+            Effect.sync(() => {
+              if (part.type !== "response-metadata") emitted = true
+            })
+          ),
+          Stream.catchReason(
+            "AiError",
+            "InvalidRequestError",
+            (_, error) => emitted ? Stream.fail(error) : params.streamText(fallbackOptions)
+          )
         )
         : params.streamText(requestOptions)
     }
@@ -1417,7 +1452,7 @@ export const make: (params: {
       const approvedResults = yield* executeApprovedToolCalls(
         pendingApproved,
         toolkit,
-        options.concurrency
+        concurrency
       )
       const deniedResults = createDenialResults(pendingDenied)
       const preResolvedResults = [...approvedResults, ...deniedResults]
@@ -1425,15 +1460,14 @@ export const make: (params: {
       if (preResolvedResults.length > 0) {
         providerOptions.prompt = Prompt.fromMessages([
           ...providerOptions.prompt.content,
-          Prompt.makeMessage("tool", { content: preResolvedResults })
+          ...Prompt.fromResponseParts(preResolvedResults).content
         ])
       }
 
       // Emit pre-resolved tool-results as stream parts so Chat.streamText
       // persists them to history. This lets collectToolApprovals find them
       // on subsequent rounds and skip the now-resolved approvals.
-      // Note: r.result is already encoded (from executeApprovedToolCalls /
-      // createDenialResults), so it goes into both result and encodedResult.
+      // Preserve the existing encoded result representation for streaming approvals.
       for (const r of preResolvedResults) {
         preResolvedStreamParts.push(
           Response.makePart("tool-result", {
@@ -1441,8 +1475,8 @@ export const make: (params: {
             name: r.name,
             providerExecuted: false,
             preliminary: false,
-            result: r.result,
-            encodedResult: r.result,
+            result: r.encodedResult,
+            encodedResult: r.encodedResult,
             isFailure: r.isFailure
           }) as Response.StreamPart<Tools>
         )
@@ -1476,11 +1510,16 @@ export const make: (params: {
       }
     }
 
+    const ResponseSchema = Schema.NonEmptyArray(Response.StreamPart(
+      options.disableToolCallResolution === true
+        ? makeToolkitWithEncodedParameters(toolkit)
+        : makeToolkitWithOpaqueParameters(toolkit)
+    ))
+    const decodeParts = Schema.decodeEffect(ResponseSchema)
+
     // If tool call resolution is disabled, return the response without
     // resolving the tool calls that were generated
     if (options.disableToolCallResolution === true) {
-      const schema = Schema.NonEmptyArray(Response.StreamPart(toolkit))
-      const decodeParts = Schema.decodeEffect(schema)
       return streamWithNonIncrementalFallback().pipe(
         Stream.mapArrayEffect((parts) =>
           decodeParts(parts).pipe(
@@ -1503,9 +1542,6 @@ export const make: (params: {
       >
     }
 
-    const ResponseSchema = Schema.NonEmptyArray(Response.StreamPart(toolkit))
-    const decodeParts = Schema.decodeEffect(ResponseSchema)
-
     // Queue for decoded parts and tool results
     const queue = yield* Queue.make<
       Response.StreamPart<Tools>,
@@ -1524,6 +1560,18 @@ export const make: (params: {
 
     // FiberSet to track concurrent tool call handlers
     const toolCallFibers = yield* FiberSet.make<void, AiError.AiError>()
+    const toolCallSemaphore = concurrency === "unbounded"
+      ? undefined
+      : yield* Semaphore.make(concurrency)
+    // Tool calls that have been observed but not yet resolved with a final
+    // result or approval request (id -> tool name)
+    const pendingToolCalls = new Map<string, string>()
+    // One-chunk lookahead buffer: a tool call's handler only starts once the
+    // stream has moved past the call (the next chunk arrives, or the stream
+    // ends with a complete finish). Providers emit a truncating finish
+    // back-to-back with the last tool call, so this window is what lets an
+    // incomplete finish prevent handlers from starting at all.
+    const bufferedToolCalls: Array<Response.ToolCallPartEncoded> = []
 
     // Helper function to handle tool calls with approval logic
     const handleToolCall = Effect.fnUntraced(function*(part: Response.ToolCallPartEncoded) {
@@ -1543,11 +1591,12 @@ export const make: (params: {
           approvalId,
           toolCallId: part.id
         }) as Response.StreamPart<Tools>
-        yield* Queue.offer(queue, approvalPart)
+        Queue.offerUnsafe(queue, approvalPart)
+        pendingToolCalls.delete(part.id)
         return
       }
 
-      yield* toolkit.handle(part.name, part.params as any).pipe(
+      yield* toolkit.handle(part.name, part.params as any, part.id).pipe(
         Stream.unwrap,
         Stream.runForEach((result) => {
           const toolResultPart = Response.makePart("tool-result", {
@@ -1556,15 +1605,36 @@ export const make: (params: {
             providerExecuted: false,
             ...result
           }) as Response.StreamPart<Tools>
-          return Queue.offer(queue, toolResultPart)
+          return Effect.sync(() => {
+            Queue.offerUnsafe(queue, toolResultPart)
+            if (result.preliminary !== true) {
+              pendingToolCalls.delete(part.id)
+            }
+          })
         })
+      )
+    })
+
+    const forkBufferedToolCalls = Effect.suspend(() => {
+      if (bufferedToolCalls.length === 0) return Effect.void
+      return Effect.forEach(
+        bufferedToolCalls.splice(0),
+        (part) => {
+          const effect = handleToolCall(part)
+          return FiberSet.run(
+            toolCallFibers,
+            toolCallSemaphore ? toolCallSemaphore.withPermit(effect) : effect
+          )
+        },
+        { discard: true }
       )
     })
 
     yield* streamWithNonIncrementalFallback().pipe(
       Stream.runForEachArray(
         Effect.fnUntraced(function*(chunk) {
-          const parts = yield* decodeParts(chunk)
+          const parts = (yield* decodeParts(chunk)) as ReadonlyArray<Response.StreamPart<Tools>>
+          yield* validateProviderExecutedToolCalls(toolkit, chunk)
           if (tracker) {
             for (const part of parts) {
               if (part.type === "response-metadata" && part.id) {
@@ -1585,10 +1655,22 @@ export const make: (params: {
           if (immediateParts.length > 0) {
             yield* Queue.offerAll(queue, immediateParts)
           }
-          // Fork tool call handlers - use the raw chunk for encoded params
+          // The stream has moved past any previously buffered tool calls, so
+          // start their handlers now - unless a finish part (possibly
+          // recorded just above) reports an incomplete response, in which
+          // case they stay pending and resolve with synthesized failure
+          // results.
+          if (findIncompleteFinishReason(deferredFinishParts) === undefined) {
+            yield* forkBufferedToolCalls
+          }
+          // Buffer this chunk's tool calls until the next chunk or the end of
+          // the stream - use the raw chunk for encoded params
           for (const part of chunk) {
             if (part.type === "tool-call" && part.providerExecuted !== true) {
-              yield* FiberSet.run(toolCallFibers, handleToolCall(part))
+              if (toolkit.tools[part.name] !== undefined) {
+                pendingToolCalls.set(part.id, part.name)
+              }
+              bufferedToolCalls.push(part)
             }
           }
         })
@@ -1596,11 +1678,31 @@ export const make: (params: {
       // Wait for all tool calls to either:
       // - complete (FiberSet.awaitEmpty)
       // - fail (FiberSet.join)
+      // If the provider reported an incomplete finish, interrupt any handlers
+      // that are still running instead and emit synthesized failure results
+      // for the tool calls left without one, so the response leaves no tool
+      // call unanswered.
       Effect.andThen(
-        Effect.raceFirst(
-          FiberSet.join(toolCallFibers),
-          FiberSet.awaitEmpty(toolCallFibers)
-        )
+        Effect.suspend(() => {
+          const incompleteFinishReason = findIncompleteFinishReason(deferredFinishParts)
+          if (incompleteFinishReason === undefined) {
+            return forkBufferedToolCalls.pipe(
+              Effect.andThen(Effect.raceFirst(
+                FiberSet.join(toolCallFibers),
+                FiberSet.awaitEmpty(toolCallFibers)
+              ))
+            )
+          }
+          return FiberSet.clear(toolCallFibers).pipe(
+            Effect.andThen(Effect.suspend(() =>
+              Queue.offerAll(
+                queue,
+                Array.from(pendingToolCalls, ([id, name]) =>
+                  makeInterruptedToolResult({ id, name }, incompleteFinishReason) as Response.StreamPart<Tools>)
+              )
+            ))
+          )
+        })
       ),
       Effect.andThen(
         Queue.offerAll(queue, deferredFinishParts)
@@ -1614,11 +1716,12 @@ export const make: (params: {
     return Stream.fromQueue(queue)
   }) as any
 
-  return {
-    generateText: generateText as Service["generateText"],
-    generateObject,
-    streamText: streamText as Service["streamText"]
-  } as const
+  return LanguageModel.of({
+    [TypeId]: TypeId,
+    generateText: generateText as LanguageModel["generateText"],
+    generateObject: generateObject as LanguageModel["generateObject"],
+    streamText: streamText as LanguageModel["streamText"]
+  })
 })
 
 // =============================================================================
@@ -1630,21 +1733,43 @@ export const make: (params: {
  *
  * **Example** (Generating text with options)
  *
- * ```ts
- * import { Effect } from "effect"
+ * ```ts import.meta.vitest
+ * import { Effect, Layer, Stream } from "effect"
  * import { LanguageModel } from "effect/unstable/ai"
  *
- * const program = Effect.gen(function*() {
- *   const response = yield* LanguageModel.generateText({
- *     prompt: "Write a haiku about programming",
- *     toolChoice: "none"
+ * const FakeLanguageModel = Layer.effect(
+ *   LanguageModel.LanguageModel,
+ *   LanguageModel.make({
+ *     generateText: (options) =>
+ *       Effect.succeed([
+ *         {
+ *           type: "text",
+ *           text: options.toolChoice === "none"
+ *             ? "Code flows through types / Errors become values / Programs stay composed"
+ *             : "Unexpected tool choice"
+ *         },
+ *         {
+ *           type: "finish",
+ *           reason: "stop",
+ *           usage: {
+ *             inputTokens: { total: 6 },
+ *             outputTokens: { total: 12 }
+ *           }
+ *         }
+ *       ]),
+ *     streamText: () => Stream.empty
  *   })
+ * )
  *
- *   console.log(response.text)
- *   console.log(response.usage.inputTokens.total)
+ * const program = LanguageModel.generateText({
+ *   prompt: "Write a haiku about programming",
+ *   toolChoice: "none"
+ * }).pipe(
+ *   Effect.map((response) => [response.text, response.usage.inputTokens.total]),
+ *   Effect.provide(FakeLanguageModel)
+ * )
  *
- *   return response
- * })
+ * await Effect.runPromise(program) // => ["Code flows through types / Errors become values / Programs stay composed", 6]
  * ```
  *
  * @category text generation
@@ -1668,7 +1793,7 @@ export const generateText: {
   >(
     options: Options & GenerateTextOptions<Tools> & { readonly toolkit: ToolkitInput<Tools> }
   ): Effect.Effect<
-    GenerateTextResponse<Tools>,
+    GenerateTextResponse<Tools, ExtractToolParametersMode<Options>>,
     ExtractError<Options>,
     LanguageModel | ExtractServices<Options>
   >
@@ -1680,12 +1805,12 @@ export const generateText: {
   >(
     options: Options & GenerateTextOptions<ExtractTools<Options>> & { readonly toolkit: Options["toolkit"] }
   ): Effect.Effect<
-    GenerateTextResponse<ExtractTools<Options>>,
+    GenerateTextResponse<ExtractTools<Options>, ExtractToolParametersMode<Options>>,
     ExtractError<Options>,
     ExtractServices<Options> | LanguageModel
   >
 } = (options: GenerateTextOptions<any>): Effect.Effect<
-  GenerateTextResponse<any>,
+  GenerateTextResponse<any, any>,
   AiError.AiError,
   LanguageModel
 > =>
@@ -1699,8 +1824,8 @@ export const generateText: {
  *
  * **Example** (Generating an object)
  *
- * ```ts
- * import { Effect, Schema } from "effect"
+ * ```ts import.meta.vitest
+ * import { Effect, Layer, Schema, Stream } from "effect"
  * import { LanguageModel } from "effect/unstable/ai"
  *
  * const EventSchema = Schema.Struct({
@@ -1709,22 +1834,31 @@ export const generateText: {
  *   location: Schema.String
  * })
  *
- * const program = Effect.gen(function*() {
- *   const response = yield* LanguageModel.generateObject({
- *     prompt:
- *       "Extract event info: Tech Conference on March 15th in San Francisco",
- *     schema: EventSchema,
- *     objectName: "event"
+ * const FakeLanguageModel = Layer.effect(
+ *   LanguageModel.LanguageModel,
+ *   LanguageModel.make({
+ *     generateText: () =>
+ *       Effect.succeed([{
+ *         type: "text",
+ *         text: '{"title":"Tech Conference","date":"March 15th","location":"San Francisco"}'
+ *       }]),
+ *     streamText: () => Stream.empty
  *   })
+ * )
  *
- *   console.log(response.value)
- *   // { title: "Tech Conference", date: "March 15th", location: "San Francisco" }
+ * const program = LanguageModel.generateObject({
+ *   prompt: "Extract event info: Tech Conference on March 15th in San Francisco",
+ *   schema: EventSchema,
+ *   objectName: "event"
+ * }).pipe(
+ *   Effect.map((response) => response.value),
+ *   Effect.provide(FakeLanguageModel)
+ * )
  *
- *   return response.value
- * })
+ * await Effect.runPromise(program) // => { title: "Tech Conference", date: "March 15th", location: "San Francisco" }
  * ```
  *
- * @category object generation
+ * @category generators
  * @since 4.0.0
  */
 export const generateObject = <
@@ -1737,7 +1871,11 @@ export const generateObject = <
 >(
   options: Options & GenerateObjectOptions<ExtractTools<Options>, StructuredOutputSchema>
 ): Effect.Effect<
-  GenerateObjectResponse<ExtractTools<Options>, StructuredOutputSchema["Type"]>,
+  GenerateObjectResponse<
+    ExtractTools<Options>,
+    StructuredOutputSchema["Type"],
+    ExtractToolParametersMode<Options>
+  >,
   ExtractError<Options>,
   ExtractServices<Options> | StructuredOutputSchema["DecodingServices"] | LanguageModel
 > =>
@@ -1756,18 +1894,30 @@ export const generateObject = <
  *
  * **Example** (Streaming text deltas)
  *
- * ```ts
- * import { Console, Effect, Stream } from "effect"
+ * ```ts import.meta.vitest
+ * import { Effect, Layer, Stream } from "effect"
  * import { LanguageModel } from "effect/unstable/ai"
+ *
+ * const FakeLanguageModel = Layer.effect(
+ *   LanguageModel.LanguageModel,
+ *   LanguageModel.make({
+ *     generateText: () => Effect.succeed([]),
+ *     streamText: () =>
+ *       Stream.make(
+ *         { type: "text-delta", id: "story", delta: "The explorer reached orbit." },
+ *         { type: "text-delta", id: "story", delta: " Earth glowed below." }
+ *       )
+ *   })
+ * )
  *
  * const program = LanguageModel.streamText({
  *   prompt: "Write a story about a space explorer"
- * }).pipe(Stream.runForEach((part) => {
- *   if (part.type === "text-delta") {
- *     return Console.log(part.delta)
- *   }
- *   return Effect.void
- * }))
+ * }).pipe(
+ *   Stream.runFold(() => "", (text, part) => part.type === "text-delta" ? text + part.delta : text),
+ *   Effect.provide(FakeLanguageModel)
+ * )
+ *
+ * await Effect.runPromise(program) // => "The explorer reached orbit. Earth glowed below."
  * ```
  *
  * @category text generation
@@ -1791,7 +1941,7 @@ export const streamText: {
   >(
     options: Options & GenerateTextOptions<Tools> & { readonly toolkit: ToolkitInput<Tools> }
   ): Stream.Stream<
-    Response.StreamPart<Tools>,
+    Response.StreamPart<Tools, ExtractToolParametersMode<Options>>,
     ExtractError<Options>,
     ExtractServices<Options> | LanguageModel
   >
@@ -1803,7 +1953,7 @@ export const streamText: {
   >(
     options: Options & GenerateTextOptions<ExtractTools<Options>> & { readonly toolkit: Options["toolkit"] }
   ): Stream.Stream<
-    Response.StreamPart<ExtractTools<Options>>,
+    Response.StreamPart<ExtractTools<Options>, ExtractToolParametersMode<Options>>,
     ExtractError<Options>,
     ExtractServices<Options> | LanguageModel
   >
@@ -1992,9 +2142,9 @@ const isApprovalNeeded = Effect.fnUntraced(function*<T extends Tool.Any>(
 const executeApprovedToolCalls = <Tools extends Record<string, Tool.Any>>(
   approvals: ReadonlyArray<ApprovalResult>,
   toolkit: Toolkit.WithHandler<Tools>,
-  concurrency: Concurrency | undefined
+  concurrency: Concurrency
 ): Effect.Effect<
-  Array<Prompt.ToolResultPart>,
+  Array<Response.ToolResultPart<string, unknown, unknown>>,
   Tool.HandlerError<Tools[keyof Tools]> | AiError.AiError,
   Tool.HandlerServices<Tools[keyof Tools]>
 > => {
@@ -2020,7 +2170,8 @@ const executeApprovedToolCalls = <Tools extends Record<string, Tool.Any>>(
 
     const resultStream = yield* toolkit.handle(
       toolCall.name,
-      toolCall.params as any
+      toolCall.params as any,
+      approval.toolCallId
     )
 
     const terminalResult = yield* resultStream.pipe(
@@ -2034,37 +2185,34 @@ const executeApprovedToolCalls = <Tools extends Record<string, Tool.Any>>(
       )
     )
 
-    return Prompt.makePart("tool-result", {
+    return Response.makePart("tool-result", {
       id: approval.toolCallId,
       name: toolCall.name,
-      isFailure: terminalResult.isFailure,
-      result: terminalResult.encodedResult
+      ...terminalResult,
+      providerExecuted: false
     })
   })
 
-  return Effect.gen(function*() {
-    const resolveConcurrency = concurrency === "inherit"
-      ? yield* Effect.service(CurrentConcurrency)
-      : (concurrency ?? "unbounded")
-
-    return yield* Effect.forEach(approvals, executeTool, {
-      concurrency: resolveConcurrency
-    })
+  return Effect.forEach(approvals, executeTool, {
+    concurrency
   })
 }
 
 const createDenialResults = (
   denials: ReadonlyArray<ApprovalResult>
-): ReadonlyArray<Prompt.ToolResultPart> => {
-  const results: Array<Prompt.ToolResultPart> = []
+): ReadonlyArray<Response.ToolResultPart<string, unknown, unknown>> => {
+  const results: Array<Response.ToolResultPart<string, unknown, unknown>> = []
   for (const denial of denials) {
     if (Predicate.isNotUndefined(denial.toolCall)) {
       results.push(
-        Prompt.makePart("tool-result", {
+        Response.makePart("tool-result", {
           id: denial.toolCallId,
           name: denial.toolCall.name,
           isFailure: true,
-          result: { type: "execution-denied", reason: denial.reason }
+          result: { type: "execution-denied", reason: denial.reason },
+          encodedResult: { type: "execution-denied", reason: denial.reason },
+          preliminary: false,
+          providerExecuted: false
         })
       )
     }
@@ -2075,6 +2223,48 @@ const createDenialResults = (
 // =============================================================================
 // Tool Call Resolution
 // =============================================================================
+
+// Finish reasons that indicate the provider completed the response. Anything
+// else (including "unknown", "other", and future reasons) fails safe and
+// prevents tool handlers from running.
+const completeFinishReasons: ReadonlyArray<Response.FinishReason> = ["stop", "tool-calls", "pause"]
+
+const findIncompleteFinishReason = (
+  content: ReadonlyArray<{ readonly type: string; readonly reason?: unknown }>
+): string | undefined => {
+  for (const part of content) {
+    if (
+      part.type === "finish" &&
+      !completeFinishReasons.includes(part.reason as Response.FinishReason)
+    ) {
+      return typeof part.reason === "string" ? part.reason : "unknown"
+    }
+  }
+  return undefined
+}
+
+// Synthesized failure result for a tool call whose handler was interrupted or
+// never started because the response finished with an incomplete reason. This
+// keeps the tool call resolved so the conversation history stays well-formed
+// for subsequent provider requests.
+const makeInterruptedToolResult = (
+  toolCall: { readonly id: string; readonly name: string },
+  finishReason: string
+) => {
+  const result = {
+    type: "execution-interrupted",
+    reason: `Tool call execution was interrupted because the response finished with reason "${finishReason}"`
+  }
+  return Response.makePart("tool-result", {
+    id: toolCall.id,
+    name: toolCall.name,
+    providerExecuted: false,
+    preliminary: false,
+    result,
+    encodedResult: result,
+    isFailure: true
+  })
+}
 
 type ToolResolutionResult<Tools extends Record<string, Tool.Any>> =
   | Response.ToolResultPart<
@@ -2088,7 +2278,7 @@ const resolveToolCalls = <Tools extends Record<string, Tool.Any>>(
   content: ReadonlyArray<Response.AllPartsEncoded>,
   toolkit: Toolkit.WithHandler<Tools>,
   messages: ReadonlyArray<Prompt.Message>,
-  concurrency: Concurrency | undefined
+  concurrency: Concurrency
 ): Stream.Stream<
   ToolResolutionResult<Tools>,
   Tool.HandlerError<Tools[keyof Tools]> | AiError.AiError,
@@ -2136,7 +2326,7 @@ const resolveToolCalls = <Tools extends Record<string, Tool.Any>>(
       }
 
       if (approvedToolCallIds.has(toolCall.id)) {
-        return toolkit.handle(toolCall.name, toolCall.params as any).pipe(
+        return toolkit.handle(toolCall.name, toolCall.params as any, toolCall.id).pipe(
           Stream.unwrap,
           Stream.map(
             (result) =>
@@ -2162,7 +2352,7 @@ const resolveToolCalls = <Tools extends Record<string, Tool.Any>>(
         )
       }
 
-      return toolkit.handle(toolCall.name, toolCall.params as any).pipe(
+      return toolkit.handle(toolCall.name, toolCall.params as any, toolCall.id).pipe(
         Stream.unwrap,
         Stream.map(
           (result) =>
@@ -2177,19 +2367,48 @@ const resolveToolCalls = <Tools extends Record<string, Tool.Any>>(
     }).pipe(Stream.unwrap)
   )
 
-  const resolveConcurrency = concurrency === "inherit"
-    ? Effect.service(CurrentConcurrency)
-    : Effect.succeed(concurrency ?? "unbounded")
-
-  return resolveConcurrency.pipe(
-    Effect.map((concurrency) => Stream.mergeAll(streams, { concurrency })),
-    Stream.unwrap
-  )
+  return Stream.mergeAll(streams, { concurrency })
 }
 
 // =============================================================================
 // Utilities
 // =============================================================================
+
+const makeToolkitWithEncodedParameters = <Tools extends Record<string, Tool.Any>>(
+  toolkit: Toolkit.WithHandler<Tools>
+): Toolkit.Any =>
+  Toolkit.make(
+    ...Object.values(toolkit.tools).map((tool) => tool.setParameters(Schema.toEncoded(tool.parametersSchema)))
+  )
+
+const makeToolkitWithOpaqueParameters = <Tools extends Record<string, Tool.Any>>(
+  toolkit: Toolkit.WithHandler<Tools>
+): Toolkit.Any =>
+  Toolkit.make(
+    ...Object.values(toolkit.tools).map((tool) => tool.setParameters(Schema.Unknown))
+  )
+
+// Provider-executed tools bypass Toolkit, so validate their parameters here.
+const validateProviderExecutedToolCalls = <Tools extends Record<string, Tool.Any>>(
+  toolkit: Toolkit.WithHandler<Tools>,
+  parts: ReadonlyArray<Response.PartEncoded | Response.StreamPartEncoded>
+): Effect.Effect<void, Schema.SchemaError> =>
+  Effect.forEach(
+    parts,
+    (part) => {
+      if (part.type !== "tool-call" || part.providerExecuted !== true) {
+        return Effect.void
+      }
+      const tool = toolkit.tools[part.name]
+      if (Predicate.isUndefined(tool) || !Schema.isSchema(tool.parametersSchema)) {
+        return Effect.void
+      }
+      return Effect.asVoid(
+        Schema.decodeUnknownEffect(tool.parametersSchema)(part.params)
+      ) as Effect.Effect<void, Schema.SchemaError>
+    },
+    { discard: true }
+  )
 
 const resolveToolkit = <Tools extends Record<string, Tool.Any>, E, R>(
   toolkit: ToolkitInput<Tools, E, R>
@@ -2199,7 +2418,7 @@ const resolveToolkit = <Tools extends Record<string, Tool.Any>, E, R>(
     : Effect.succeed(toolkit as unknown as Toolkit.WithHandler<Tools>)) as any
 
 /** @internal */
-export const getObjectName = <StructuredOutputSchema extends Schema.Top>(
+export const getObjectName = <StructuredOutputSchema extends Schema.Constraint>(
   objectName: string | undefined,
   schema: StructuredOutputSchema
 ): string => {
@@ -2209,7 +2428,7 @@ export const getObjectName = <StructuredOutputSchema extends Schema.Top>(
   if ("identifier" in schema && typeof schema.identifier === "string") {
     return schema.identifier
   }
-  const identifier = AST.resolveIdentifier(schema.ast)
+  const identifier = SchemaAST.resolveIdentifier(schema.ast)
   if (typeof identifier === "string") {
     return identifier
   }
@@ -2217,7 +2436,7 @@ export const getObjectName = <StructuredOutputSchema extends Schema.Top>(
 }
 
 const resolveStructuredOutput = Effect.fnUntraced(function*<
-  StructuredOutputSchema extends Schema.Top
+  StructuredOutputSchema extends Schema.Constraint
 >(response: ReadonlyArray<Response.AllParts<any>>, schema: StructuredOutputSchema) {
   const texts: Array<string> = []
   for (const part of response) {

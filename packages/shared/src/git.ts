@@ -11,7 +11,13 @@ import * as Result from "effect/Result";
 import { detectSourceControlProviderFromRemoteUrl } from "./sourceControl.ts";
 
 export const WORKTREE_BRANCH_PREFIX = "t3code";
-const TEMP_WORKTREE_BRANCH_PATTERN = new RegExp(`^${WORKTREE_BRANCH_PREFIX}\\/[0-9a-f]{8}$`);
+// Canonical form is `t3code/<8 hex>`. Older mobile builds generated `t3code/<uuid>`
+// via Crypto.randomUUID() (always RFC 4122 v4), so the matcher also accepts exactly
+// that shape — version nibble `4`, variant nibble `[89ab]` — to keep those threads
+// eligible for branch regeneration without loosening beyond what was ever generated.
+const TEMP_WORKTREE_BRANCH_PATTERN = new RegExp(
+  `^${WORKTREE_BRANCH_PREFIX}\\/(?:[0-9a-f]{8}|[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$`,
+);
 
 /**
  * Sanitize an arbitrary string into a valid, lowercase git refName fragment.
@@ -89,12 +95,36 @@ export function deriveLocalBranchNameFromRemoteRef(branchName: string): string {
 export function buildTemporaryWorktreeBranchName(
   randomHex: (byteLength: number) => string,
 ): string {
-  const token = randomHex(4).toLowerCase();
+  // Normalize to exactly 8 lowercase hex chars so a UUID-shaped callback
+  // still produces the canonical temporary branch form.
+  const token = randomHex(4)
+    .toLowerCase()
+    .replace(/[^0-9a-f]/g, "")
+    .slice(0, 8);
   return `${WORKTREE_BRANCH_PREFIX}/${token}`;
 }
 
 export function isTemporaryWorktreeBranch(refName: string): boolean {
   return TEMP_WORKTREE_BRANCH_PATTERN.test(refName.trim().toLowerCase());
+}
+
+/**
+ * The web spelling of an Azure DevOps repository reached over SSH, or null for anything else.
+ *
+ * Azure alone addresses one repository under two names that share no part: `ssh.dev.azure.com` and
+ * `v3/{org}/{project}/{repo}` over SSH, against `dev.azure.com` and `{org}/{project}/_git/{repo}`
+ * everywhere a person sees it. A project cloned over SSH would otherwise be a different repository
+ * to every comparison made against a pull request URL, which arrives in the web spelling. So the
+ * web spelling is the one both are keyed by.
+ */
+function azureDevOpsRepositoryKey(host: string, segments: ReadonlyArray<string>): string | null {
+  if (host !== "ssh.dev.azure.com" && host !== "vs-ssh.visualstudio.com") return null;
+  const [marker, organization, project, repository] = segments;
+  if (segments.length !== 4 || marker !== "v3") return null;
+  if (!organization || !project || !repository) return null;
+  return host === "ssh.dev.azure.com"
+    ? `dev.azure.com/${organization}/${project}/_git/${repository}`
+    : `${organization}.visualstudio.com/${project}/_git/${repository}`;
 }
 
 /**
@@ -110,24 +140,92 @@ export function normalizeGitRemoteUrl(value: string): string {
   if (/^(?:ssh|https?|git):\/\//i.test(normalized)) {
     try {
       const url = new URL(normalized);
-      const repositoryPath = url.pathname
-        .split("/")
-        .filter((segment) => segment.length > 0)
-        .join("/");
-      if (url.hostname && repositoryPath.includes("/")) {
-        return `${url.hostname}/${repositoryPath}`;
+      const repositorySegments = url.pathname.split("/").filter((segment) => segment.length > 0);
+      if (url.hostname && repositorySegments.length > 1) {
+        return (
+          azureDevOpsRepositoryKey(url.hostname, repositorySegments) ??
+          `${url.hostname}/${repositorySegments.join("/")}`
+        );
       }
     } catch {
       return normalized;
     }
   }
 
-  const scpStyleHostAndPath = /^git@([^:/\s]+)[:/]([^/\s]+(?:\/[^/\s]+)+)$/i.exec(normalized);
-  if (scpStyleHostAndPath?.[1] && scpStyleHostAndPath[2]) {
-    return `${scpStyleHostAndPath[1]}/${scpStyleHostAndPath[2]}`;
+  const scpStyleHostAndPath = /^[a-zA-Z0-9._-]+@([^:/\s]+):([^/\s]+(?:\/[^/\s]+)+)$/i.exec(
+    normalized,
+  );
+  const scpHost = scpStyleHostAndPath?.[1];
+  const scpPath = scpStyleHostAndPath?.[2];
+  if (scpHost && scpPath) {
+    return azureDevOpsRepositoryKey(scpHost, scpPath.split("/")) ?? `${scpHost}/${scpPath}`;
   }
 
   return normalized;
+}
+
+/**
+ * Unquote a git config value: strip an inline `#` or `;` comment outside
+ * quotes, then drop surrounding quotes and backslash escapes.
+ */
+function parseGitConfigValue(raw: string): string {
+  let out = "";
+  let quoted = false;
+  for (let index = 0; index < raw.length; index += 1) {
+    const char = raw[index]!;
+    if (char === "\\" && index + 1 < raw.length) {
+      out += raw[index + 1];
+      index += 1;
+      continue;
+    }
+    if (char === '"') {
+      quoted = !quoted;
+      continue;
+    }
+    if (!quoted && (char === "#" || char === ";")) break;
+    out += char;
+  }
+  return out.trim();
+}
+
+/**
+ * Read the primary remote URL from raw `.git/config` text without spawning
+ * git. Prefers `remote.origin.url` and falls back to the first remote so
+ * clones made with `git clone --origin <name>` still resolve.
+ */
+export function parseOriginUrlFromGitConfig(configText: string): string | null {
+  let section: string | null = null;
+  let originUrl: string | null = null;
+  let firstRemoteUrl: string | null = null;
+  // A trailing backslash continues the value on the next line.
+  const joined = configText.replace(/\\\r?\n[ \t]*/g, "");
+  for (const rawLine of joined.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (line.length === 0 || line.startsWith("#") || line.startsWith(";")) continue;
+    // Both `[remote "origin"]` and the legacy `[remote.origin]` form, with an
+    // optional trailing comment. Git keeps quoted subsections case-sensitive
+    // but folds the dotted form to lowercase.
+    const header = /^\[\s*remote(?:\s+"([^"]+)"|\.([^\]\s]+))\s*\](?:\s*[#;].*)?$/i.exec(line);
+    if (header) {
+      section = header[1] ?? header[2]?.toLowerCase() ?? null;
+      continue;
+    }
+    if (line.startsWith("[")) {
+      section = null;
+      continue;
+    }
+    if (section === null) continue;
+    const match = /^url\s*=\s*(.*)$/i.exec(line);
+    if (!match) continue;
+    const url = parseGitConfigValue(match[1] ?? "");
+    if (url.length === 0) continue;
+    if (section === "origin") {
+      originUrl ??= url;
+    } else {
+      firstRemoteUrl ??= url;
+    }
+  }
+  return originUrl ?? firstRemoteUrl;
 }
 
 /**
@@ -140,7 +238,7 @@ export function parseGitHubRepositoryNameWithOwnerFromRemoteUrl(url: string | nu
   }
 
   const match =
-    /^(?:git@github\.com:|ssh:\/\/git@github\.com\/|https:\/\/github\.com\/|git:\/\/github\.com\/)([^/\s]+\/[^/\s]+?)(?:\.git)?\/?$/i.exec(
+    /^(?:git@github\.com:|ssh:\/\/(?:git@)?github\.com\/|https:\/\/github\.com\/|git:\/\/github\.com\/)([^/\s]+\/[^/\s]+?)(?:\.git)?\/?$/i.exec(
       trimmed,
     );
   const repositoryNameWithOwner = match?.[1]?.trim() ?? "";

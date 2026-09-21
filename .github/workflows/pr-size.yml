@@ -156,6 +156,9 @@ jobs:
               ":(glob,exclude)**/*.browser.*",
               ":(glob,exclude)**/*.integration.*",
             ];
+            // Reference snapshots can make a legitimate numstat exceed Node's
+            // 1 MiB default. Keep the output cap bounded for this passive job.
+            const gitTextOutput = { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 };
 
             const sumNumstat = (text) =>
               text
@@ -208,7 +211,7 @@ jobs:
             );
 
             const resolvedHeadSha = execFileSync("git", ["rev-parse", headTrackingRef], {
-              encoding: "utf8",
+              ...gitTextOutput,
             }).trim();
 
             if (resolvedHeadSha !== headSha) {
@@ -233,12 +236,12 @@ jobs:
               execFileSync(
                 "git",
                 diffArgs,
-                { encoding: "utf8" },
+                gitTextOutput,
               ),
             );
             const nonTestChangedLines = sumNumstat(
               execFileSync("git", [...diffArgs, "--", ".", ...testExcludePathspecs], {
-                encoding: "utf8",
+                ...gitTextOutput,
               }),
             );
             const testChangedLines = Math.max(0, totalChangedLines - nonTestChangedLines);

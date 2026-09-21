@@ -1,6 +1,8 @@
+import { assert } from "@effect/vitest"
 import { JsonSchema, Schema, SchemaRepresentation } from "effect"
+import { TestSchema } from "effect/testing"
 import { describe, it } from "vitest"
-import { deepStrictEqual, strictEqual } from "../../utils/assert.ts"
+import { assertTrue, deepStrictEqual, strictEqual, throws } from "../../utils/assert.ts"
 
 type Category = {
   readonly name: string
@@ -35,62 +37,85 @@ describe("toCodeDocument", () => {
   }
 
   function assertSchema(input: {
-    readonly schema: Schema.Top
-    readonly reviver?: SchemaRepresentation.Reviver<SchemaRepresentation.Code> | undefined
+    readonly schema: Schema.Constraint
   }, expected: Expected) {
-    const multiDocument = SchemaRepresentation.fromASTs([input.schema.ast])
-    assertMultiDocument({ multiDocument }, expected)
+    const multiDocument = SchemaRepresentation.toRepresentations([input.schema.ast])
+    assertMultiDocument(multiDocument, expected)
   }
 
   function assertJsonSchema(input: {
     readonly schema: JsonSchema.JsonSchema
-    readonly reviver?: SchemaRepresentation.Reviver<SchemaRepresentation.Code> | undefined
   }, expected: Expected) {
-    const multiDocument = SchemaRepresentation.toMultiDocument(
-      SchemaRepresentation.fromJsonSchemaDocument(JsonSchema.fromSchemaDraft2020_12(input.schema), {
-        onEnter: (js) => {
-          if (js.type === "object" && js.additionalProperties === undefined) {
-            return { ...js, additionalProperties: false }
-          }
-          return js
-        }
-      })
+    const schema = SchemaRepresentation.fromJsonSchemaDocument(
+      JsonSchema.fromSchemaDraft2020_12(input.schema),
+      {
+        onEnter: (js) =>
+          js.type === "object" && js.additionalProperties === undefined
+            ? { ...js, additionalProperties: false }
+            : js
+      }
     )
-    assertMultiDocument({ multiDocument }, expected)
+    assertMultiDocument(SchemaRepresentation.toRepresentations([schema.ast]), expected)
   }
 
-  function assertMultiDocument(input: {
-    readonly multiDocument: SchemaRepresentation.MultiDocument
-    readonly reviver?: SchemaRepresentation.Reviver<SchemaRepresentation.Code> | undefined
-  }, expected: Expected) {
-    const codeDocument = SchemaRepresentation.toCodeDocument(input.multiDocument, { reviver: input.reviver })
-    deepStrictEqual(codeDocument, {
-      codes: Array.isArray(expected.codes) ? expected.codes : [expected.codes],
-      references: {
-        nonRecursives: expected.references?.nonRecursives ?? [],
-        recursives: expected.references?.recursives ?? {}
-      },
-      artifacts: expected.artifacts ?? []
-    })
+  function assertMultiDocument(
+    multiDocument: SchemaRepresentation.MultiDocument,
+    expected: Expected
+  ) {
+    const codeDocument = SchemaRepresentation.toCodeDocument(multiDocument)
+    deepStrictEqual(
+      canonicalizeGeneratedCode(codeDocument),
+      canonicalizeGeneratedCode({
+        codes: Array.isArray(expected.codes) ? expected.codes : [expected.codes],
+        references: {
+          nonRecursives: expected.references?.nonRecursives ?? [],
+          recursives: expected.references?.recursives ?? {}
+        },
+        artifacts: expected.artifacts ?? []
+      })
+    )
+  }
+
+  function canonicalizeGeneratedCode(input: unknown): unknown {
+    if (typeof input === "string") {
+      return input
+        .replaceAll(/"expected": "(?:\\.|[^"\\])*"(?:, )?/g, "")
+        .replaceAll(", }", " }")
+        .replaceAll(".annotate({  })", "")
+    }
+    if (Array.isArray(input)) return input.map(canonicalizeGeneratedCode)
+    if (typeof input !== "object" || input === null) return input
+    return Object.fromEntries(
+      Object.entries(input).map(([key, value]) => [key, canonicalizeGeneratedCode(value)])
+    )
   }
 
   const makeCode = SchemaRepresentation.makeCode
-
-  describe("options", () => {
-    it("reviver can override declaration code and recur into type parameters", () => {
-    })
-  })
+  const templateType = (...types: ReadonlyArray<string>) => `\`${types.map((type) => `\${${type}}`).join("")}\``
 
   describe("Declaration", () => {
-    it("declaration without typeConstructor annotation", () => {
-      assertSchema({ schema: Schema.instanceOf(URL) }, {
-        codes: makeCode("Schema.Null", "null")
-      })
+    it("declaration without a toCode annotation", () => {
+      throws(
+        () => assertSchema({ schema: Schema.instanceOf(URL) }, { codes: makeCode("", "") }),
+        "Missing toCode callback\n  at [\"representations\"][0][\"annotations\"][\"toCode\"]"
+      )
     })
 
     it("Error", () => {
-      assertSchema({ schema: Schema.Error }, {
-        codes: makeCode(`Schema.Error`, "globalThis.Error")
+      assertSchema({ schema: Schema.ErrorInstance() }, {
+        codes: makeCode(`Schema.ErrorInstance()`, "globalThis.Error")
+      })
+    })
+
+    it("Error with stack", () => {
+      assertSchema({ schema: Schema.ErrorInstance({ includeStack: true }) }, {
+        codes: makeCode(`Schema.ErrorInstance({"includeStack":true})`, "globalThis.Error")
+      })
+    })
+
+    it("Error with excluded cause", () => {
+      assertSchema({ schema: Schema.ErrorInstance({ excludeCause: true }) }, {
+        codes: makeCode(`Schema.ErrorInstance({"excludeCause":true})`, "globalThis.Error")
       })
     })
 
@@ -174,6 +199,27 @@ describe("toCodeDocument", () => {
           artifacts: [{
             _tag: "Import",
             importDeclaration: `import * as Result from "effect/Result"`
+          }]
+        }
+      )
+    })
+
+    it("Redacted options", () => {
+      assertSchema(
+        {
+          schema: Schema.Redacted(Schema.String, {
+            label: "password",
+            disallowJsonEncode: true
+          })
+        },
+        {
+          codes: makeCode(
+            `Schema.Redacted(Schema.String, {"label":"password","disallowJsonEncode":true})`,
+            "Redacted.Redacted<string>"
+          ),
+          artifacts: [{
+            _tag: "Import",
+            importDeclaration: `import * as Redacted from "effect/Redacted"`
           }]
         }
       )
@@ -334,7 +380,7 @@ describe("toCodeDocument", () => {
       assertSchema(
         { schema: Schema.String.check(Schema.isMinLength(1, { description: "a" })) },
         {
-          codes: makeCode(`Schema.String.check(Schema.isMinLength(1, { "description": "a" }))`, "string")
+          codes: makeCode(`Schema.String.check(Schema.isMinLength(1).annotate({ "description": "a" }))`, "string")
         }
       )
     })
@@ -343,7 +389,7 @@ describe("toCodeDocument", () => {
       assertSchema(
         { schema: Schema.String.check(Schema.isMinLength(1)).annotate({ "description": "a" }) },
         {
-          codes: makeCode(`Schema.String.check(Schema.isMinLength(1, { "description": "a" }))`, "string")
+          codes: makeCode(`Schema.String.check(Schema.isMinLength(1).annotate({ "description": "a" }))`, "string")
         }
       )
     })
@@ -372,6 +418,15 @@ describe("toCodeDocument", () => {
           { schema: Schema.String.check(Schema.isIncludes("a")) },
           {
             codes: makeCode(`Schema.String.check(Schema.isIncludes("a"))`, "string")
+          }
+        )
+      })
+
+      it("isGUID with annotations", () => {
+        assertSchema(
+          { schema: Schema.String.check(Schema.isGUID({ message: "message" })) },
+          {
+            codes: makeCode(`Schema.String.check(Schema.isGUID().annotate({ "message": "message" }))`, "string")
           }
         )
       })
@@ -519,7 +574,7 @@ describe("toCodeDocument", () => {
           artifacts: [{
             _tag: "Symbol",
             identifier: "_symbol",
-            generation: makeCode(`Symbol("a")`, `typeof _symbol`)
+            code: makeCode(`Symbol("a")`, `typeof _symbol`)
           }]
         }
       )
@@ -530,7 +585,7 @@ describe("toCodeDocument", () => {
           artifacts: [{
             _tag: "Symbol",
             identifier: "_symbol",
-            generation: makeCode(`Symbol()`, `typeof _symbol`)
+            code: makeCode(`Symbol()`, `typeof _symbol`)
           }]
         }
       )
@@ -544,7 +599,7 @@ describe("toCodeDocument", () => {
           artifacts: [{
             _tag: "Symbol",
             identifier: "_symbol",
-            generation: makeCode(`Symbol.for("a")`, `typeof _symbol`)
+            code: makeCode(`Symbol.for("a")`, `typeof _symbol`)
           }]
         }
       )
@@ -558,7 +613,7 @@ describe("toCodeDocument", () => {
           artifacts: [{
             _tag: "Symbol",
             identifier: "_symbol",
-            generation: makeCode(`Symbol.for("a")`, `typeof _symbol`)
+            code: makeCode(`Symbol.for("a")`, `typeof _symbol`)
           }]
         }
       )
@@ -575,11 +630,11 @@ describe("toCodeDocument", () => {
           })
         },
         {
-          codes: makeCode(`Schema.Enum(_Enum)`, `typeof _Enum`),
+          codes: makeCode(`Schema.Enum(_Enum)`, `_Enum`),
           artifacts: [{
             _tag: "Enum",
             identifier: "_Enum",
-            generation: makeCode(`enum _Enum { "A": "a", "B": "b" }`, `typeof _Enum`)
+            code: makeCode(`enum _Enum { "A" = "a", "B" = "b" }`, `typeof _Enum`)
           }]
         }
       )
@@ -593,12 +648,12 @@ describe("toCodeDocument", () => {
         {
           codes: makeCode(
             `Schema.Enum(_Enum).annotate({ "description": "a" })`,
-            `typeof _Enum`
+            `_Enum`
           ),
           artifacts: [{
             _tag: "Enum",
             identifier: "_Enum",
-            generation: makeCode(`enum _Enum { "A": "a", "B": "b" }`, `typeof _Enum`)
+            code: makeCode(`enum _Enum { "A" = "a", "B" = "b" }`, `typeof _Enum`)
           }]
         }
       )
@@ -613,11 +668,11 @@ describe("toCodeDocument", () => {
           })
         },
         {
-          codes: makeCode(`Schema.Enum(_Enum)`, `typeof _Enum`),
+          codes: makeCode(`Schema.Enum(_Enum)`, `_Enum`),
           artifacts: [{
             _tag: "Enum",
             identifier: "_Enum",
-            generation: makeCode(`enum _Enum { "One": 1, "Two": 2 }`, `typeof _Enum`)
+            code: makeCode(`enum _Enum { "One" = 1, "Two" = 2 }`, `typeof _Enum`)
           }]
         }
       )
@@ -631,12 +686,12 @@ describe("toCodeDocument", () => {
         {
           codes: makeCode(
             `Schema.Enum(_Enum).annotate({ "description": "a" })`,
-            `typeof _Enum`
+            `_Enum`
           ),
           artifacts: [{
             _tag: "Enum",
             identifier: "_Enum",
-            generation: makeCode(`enum _Enum { "One": 1, "Two": 2 }`, `typeof _Enum`)
+            code: makeCode(`enum _Enum { "One" = 1, "Two" = 2 }`, `typeof _Enum`)
           }]
         }
       )
@@ -651,11 +706,11 @@ describe("toCodeDocument", () => {
           })
         },
         {
-          codes: makeCode(`Schema.Enum(_Enum)`, `typeof _Enum`),
+          codes: makeCode(`Schema.Enum(_Enum)`, `_Enum`),
           artifacts: [{
             _tag: "Enum",
             identifier: "_Enum",
-            generation: makeCode(`enum _Enum { "A": "a", "One": 1 }`, `typeof _Enum`)
+            code: makeCode(`enum _Enum { "A" = "a", "One" = 1 }`, `typeof _Enum`)
           }]
         }
       )
@@ -669,12 +724,12 @@ describe("toCodeDocument", () => {
         {
           codes: makeCode(
             `Schema.Enum(_Enum).annotate({ "description": "a" })`,
-            `typeof _Enum`
+            `_Enum`
           ),
           artifacts: [{
             _tag: "Enum",
             identifier: "_Enum",
-            generation: makeCode(`enum _Enum { "A": "a", "One": 1 }`, `typeof _Enum`)
+            code: makeCode(`enum _Enum { "A" = "a", "One" = 1 }`, `typeof _Enum`)
           }]
         }
       )
@@ -695,7 +750,7 @@ describe("toCodeDocument", () => {
       assertSchema(
         { schema: Schema.TemplateLiteral([Schema.Literal("a")]) },
         {
-          codes: makeCode(`Schema.TemplateLiteral([Schema.Literal("a")])`, "`a`")
+          codes: makeCode(`Schema.TemplateLiteral([Schema.Literal("a")])`, templateType(`"a"`))
         }
       )
     })
@@ -704,7 +759,7 @@ describe("toCodeDocument", () => {
       assertSchema(
         { schema: Schema.TemplateLiteral([Schema.Literal(1)]) },
         {
-          codes: makeCode(`Schema.TemplateLiteral([Schema.Literal(1)])`, "`1`")
+          codes: makeCode(`Schema.TemplateLiteral([Schema.Literal(1)])`, templateType("1"))
         }
       )
     })
@@ -713,7 +768,7 @@ describe("toCodeDocument", () => {
       assertSchema(
         { schema: Schema.TemplateLiteral([Schema.Literal(1n)]) },
         {
-          codes: makeCode(`Schema.TemplateLiteral([Schema.Literal(1n)])`, "`1`")
+          codes: makeCode(`Schema.TemplateLiteral([Schema.Literal(1n)])`, templateType("1n"))
         }
       )
     })
@@ -724,7 +779,7 @@ describe("toCodeDocument", () => {
         {
           codes: makeCode(
             `Schema.TemplateLiteral([Schema.Literal("a"), Schema.Literal("b"), Schema.Literal("c")])`,
-            "`abc`"
+            templateType(`"a"`, `"b"`, `"c"`)
           )
         }
       )
@@ -736,7 +791,7 @@ describe("toCodeDocument", () => {
         {
           codes: makeCode(
             `Schema.TemplateLiteral([Schema.Literal("a b"), Schema.String])`,
-            "`a b${string}`"
+            templateType(`"a b"`, "string")
           )
         }
       )
@@ -745,10 +800,19 @@ describe("toCodeDocument", () => {
         {
           codes: makeCode(
             `Schema.TemplateLiteral([Schema.Literal("\\n"), Schema.String])`,
-            "`\n${string}`"
+            templateType(`"\\n"`, "string")
           )
         }
       )
+
+      for (const literal of ["`", "${number}", "\\"]) {
+        const code = SchemaRepresentation.toCodeDocument(
+          SchemaRepresentation.toRepresentations([
+            Schema.TemplateLiteral([Schema.Literal(literal)]).ast
+          ])
+        ).codes[0]
+        strictEqual(code.Type, templateType(JSON.stringify(literal)))
+      }
     })
 
     it("only schemas", () => {
@@ -787,7 +851,7 @@ describe("toCodeDocument", () => {
         {
           codes: makeCode(
             `Schema.TemplateLiteral([Schema.String, Schema.Literal("a")])`,
-            "`${string}a`"
+            templateType("string", `"a"`)
           )
         }
       )
@@ -796,7 +860,7 @@ describe("toCodeDocument", () => {
         {
           codes: makeCode(
             `Schema.TemplateLiteral([Schema.Number, Schema.Literal("a")])`,
-            "`${number}a`"
+            templateType("number", `"a"`)
           )
         }
       )
@@ -805,7 +869,7 @@ describe("toCodeDocument", () => {
         {
           codes: makeCode(
             `Schema.TemplateLiteral([Schema.BigInt, Schema.Literal("a")])`,
-            "`${bigint}a`"
+            templateType("bigint", `"a"`)
           )
         }
       )
@@ -817,7 +881,7 @@ describe("toCodeDocument", () => {
         {
           codes: makeCode(
             `Schema.TemplateLiteral([Schema.Literal("a"), Schema.String])`,
-            "`a${string}`"
+            templateType(`"a"`, "string")
           )
         }
       )
@@ -826,7 +890,7 @@ describe("toCodeDocument", () => {
         {
           codes: makeCode(
             `Schema.TemplateLiteral([Schema.Literal("a"), Schema.Number])`,
-            "`a${number}`"
+            templateType(`"a"`, "number")
           )
         }
       )
@@ -835,7 +899,7 @@ describe("toCodeDocument", () => {
         {
           codes: makeCode(
             `Schema.TemplateLiteral([Schema.Literal("a"), Schema.BigInt])`,
-            "`a${bigint}`"
+            templateType(`"a"`, "bigint")
           )
         }
       )
@@ -847,7 +911,7 @@ describe("toCodeDocument", () => {
         {
           codes: makeCode(
             `Schema.TemplateLiteral([Schema.String, Schema.Literal("-"), Schema.Number])`,
-            "`${string}-${number}`"
+            templateType("string", `"-"`, "number")
           )
         }
       )
@@ -860,7 +924,7 @@ describe("toCodeDocument", () => {
         {
           codes: makeCode(
             `Schema.TemplateLiteral([Schema.String, Schema.Literal("-"), Schema.Number]).annotate({ "description": "ad" })`,
-            "`${string}-${number}`"
+            templateType("string", `"-"`, "number")
           )
         }
       )
@@ -877,7 +941,7 @@ describe("toCodeDocument", () => {
         {
           codes: makeCode(
             `Schema.TemplateLiteral([Schema.Literal("a"), Schema.TemplateLiteral([Schema.String, Schema.Literals(["-", "+"]), Schema.Number])])`,
-            "`a${string}-${number}` | `a${string}+${number}`"
+            templateType(`"a"`, templateType("string", `"-" | "+"`, "number"))
           )
         }
       )
@@ -891,7 +955,7 @@ describe("toCodeDocument", () => {
         {
           codes: makeCode(
             `Schema.TemplateLiteral([Schema.Literal("a"), Schema.Union([Schema.String, Schema.Number])])`,
-            "`a${string}` | `a${number}`"
+            templateType(`"a"`, "string | number")
           )
         }
       )
@@ -905,10 +969,39 @@ describe("toCodeDocument", () => {
         {
           codes: makeCode(
             `Schema.TemplateLiteral([Schema.Literals(["a", "b"]), Schema.String])`,
-            "`a${string}` | `b${string}`"
+            templateType(`"a" | "b"`, "string")
           )
         }
       )
+    })
+
+    it("uses the encoded type of branded parts", () => {
+      const schema = Schema.TemplateLiteral([
+        Schema.String.pipe(Schema.brand("StringPart")),
+        Schema.Union([
+          Schema.Number.pipe(Schema.brand("NumberPart")),
+          Schema.String.pipe(Schema.brand("OtherStringPart"))
+        ])
+      ])
+      const code = SchemaRepresentation.toCodeDocument(
+        SchemaRepresentation.toRepresentations([schema.ast])
+      ).codes[0]
+
+      strictEqual(
+        code.runtime,
+        `Schema.TemplateLiteral([Schema.String.pipe(Schema.brand("StringPart")), Schema.Union([Schema.Number.pipe(Schema.brand("NumberPart")), Schema.String.pipe(Schema.brand("OtherStringPart"))])])`
+      )
+      strictEqual(code.Type, templateType("string", "number | string"))
+    })
+
+    it("resolves the encoded type of branded references", () => {
+      const part = Schema.String.pipe(Schema.brand("Part")).annotate({ identifier: "Part" })
+      const code = SchemaRepresentation.toCodeDocument(
+        SchemaRepresentation.toRepresentations([Schema.TemplateLiteral([part]).ast])
+      ).codes[0]
+
+      strictEqual(code.runtime, "Schema.TemplateLiteral([Part])")
+      strictEqual(code.Type, templateType("string"))
     })
 
     it("multiple unions", () => {
@@ -922,11 +1015,22 @@ describe("toCodeDocument", () => {
         },
         {
           codes: makeCode(
-            `Schema.TemplateLiteral([Schema.Literals(["a", "b"]), Schema.String, Schema.Union([Schema.BigInt, Schema.Number])])`,
-            "`a${string}${bigint}` | `a${string}${number}` | `b${string}${bigint}` | `b${string}${number}`"
+            `Schema.TemplateLiteral([Schema.Literals(["a", "b"]), Schema.String, Schema.Union([Schema.Number, Schema.BigInt])])`,
+            templateType(`"a" | "b"`, "string", "number | bigint")
           )
         }
       )
+    })
+
+    it("does not expand combinations of unions", () => {
+      const part = Schema.Literals(["a", "b"])
+      const schema = Schema.TemplateLiteral(Array.from({ length: 20 }, () => part))
+      const Type = SchemaRepresentation.toCodeDocument(
+        SchemaRepresentation.toRepresentations([schema.ast])
+      ).codes[0].Type
+
+      strictEqual(Type, templateType(...Array.from({ length: 20 }, () => `"a" | "b"`)))
+      assertTrue(Type.length < 500)
     })
   })
 
@@ -965,7 +1069,7 @@ describe("toCodeDocument", () => {
       assertSchema(
         { schema: Schema.Tuple([Schema.optionalKey(Schema.String)]) },
         {
-          codes: makeCode(`Schema.Tuple([Schema.optionalKey(Schema.String)])`, "readonly [string?]")
+          codes: makeCode(`Schema.Tuple([Schema.optionalKey(Schema.String)])`, `readonly [(string)?]`)
         }
       )
       assertSchema(
@@ -973,10 +1077,58 @@ describe("toCodeDocument", () => {
         {
           codes: makeCode(
             `Schema.Tuple([Schema.optionalKey(Schema.String)]).annotate({ "description": "a" })`,
-            "readonly [string?]"
+            `readonly [(string)?]`
           )
         }
       )
+    })
+
+    it("optional union elements", () => {
+      assertSchema(
+        { schema: Schema.Tuple([Schema.optionalKey(Schema.Union([Schema.String, Schema.Number]))]) },
+        {
+          codes: makeCode(
+            `Schema.Tuple([Schema.optionalKey(Schema.Union([Schema.String, Schema.Number]))])`,
+            `readonly [(string | number)?]`
+          )
+        }
+      )
+      assertSchema(
+        { schema: Schema.Tuple([Schema.optionalKey(Schema.Literals(["a", "b"]))]) },
+        {
+          codes: makeCode(
+            `Schema.Tuple([Schema.optionalKey(Schema.Literals(["a", "b"]))])`,
+            `readonly [("a" | "b")?]`
+          )
+        }
+      )
+    })
+
+    it("optional readonly tuple element", () => {
+      assertSchema(
+        { schema: Schema.Tuple([Schema.optionalKey(Schema.Tuple([Schema.String]))]) },
+        {
+          codes: makeCode(
+            `Schema.Tuple([Schema.optionalKey(Schema.Tuple([Schema.String]))])`,
+            `readonly [(readonly [string])?]`
+          )
+        }
+      )
+    })
+
+    it("optional union element imported from JSON Schema", () => {
+      assertJsonSchema({
+        schema: {
+          type: "array",
+          prefixItems: [{ anyOf: [{ type: "string" }, { type: "number" }] }],
+          items: false
+        }
+      }, {
+        codes: makeCode(
+          `Schema.Tuple([Schema.optionalKey(Schema.Union([Schema.String, Schema.Number.check(Schema.isFinite())]))])`,
+          `readonly [(string | number)?]`
+        )
+      })
     })
 
     it("annotateKey", () => {
@@ -1012,6 +1164,20 @@ describe("toCodeDocument", () => {
 
   it("TupleWithRest", () => {
     assertSchema(
+      {
+        schema: Schema.TupleWithRest(
+          Schema.Tuple([Schema.optionalKey(Schema.Union([Schema.String, Schema.Number]))]),
+          [Schema.Boolean]
+        )
+      },
+      {
+        codes: makeCode(
+          `Schema.TupleWithRest(Schema.Tuple([Schema.optionalKey(Schema.Union([Schema.String, Schema.Number]))]), [Schema.Boolean])`,
+          `readonly [(string | number)?, ...Array<boolean>]`
+        )
+      }
+    )
+    assertSchema(
       { schema: Schema.TupleWithRest(Schema.Tuple([Schema.String]), [Schema.Number]) },
       {
         codes: makeCode(
@@ -1045,6 +1211,42 @@ describe("toCodeDocument", () => {
   })
 
   describe("Struct", () => {
+    it("preserves a required __proto__ property in generated code", async () => {
+      const schema = Schema.Struct({ ["__proto__"]: Schema.String })
+      assertSchema({ schema }, {
+        codes: makeCode(
+          `Schema.Struct({ ["__proto__"]: Schema.String })`,
+          `{ readonly "__proto__": string }`
+        )
+      })
+
+      const document = SchemaRepresentation.toCodeDocument(SchemaRepresentation.toRepresentations([schema.ast]))
+      const generated: typeof schema = new Function("Schema", `return ${document.codes[0].runtime}`)(Schema)
+      assert.deepStrictEqual(Object.keys(generated.fields), ["__proto__"])
+      const decoding = new TestSchema.Asserts(generated).decoding()
+      await decoding.succeed({ ["__proto__"]: "value" })
+      await decoding.fail({}, `Missing key\n  at ["__proto__"]`)
+      await decoding.fail({ ["__proto__"]: 123 }, `Expected string\n  at ["__proto__"]`)
+    })
+
+    it("preserves an optional __proto__ property in generated code", async () => {
+      const schema = Schema.Struct({ ["__proto__"]: Schema.optionalKey(Schema.String) })
+      assertSchema({ schema }, {
+        codes: makeCode(
+          `Schema.Struct({ ["__proto__"]: Schema.optionalKey(Schema.String) })`,
+          `{ readonly "__proto__"?: string }`
+        )
+      })
+
+      const document = SchemaRepresentation.toCodeDocument(SchemaRepresentation.toRepresentations([schema.ast]))
+      const generated: typeof schema = new Function("Schema", `return ${document.codes[0].runtime}`)(Schema)
+      assert.deepStrictEqual(Object.keys(generated.fields), ["__proto__"])
+      const decoding = new TestSchema.Asserts(generated).decoding()
+      await decoding.succeed({})
+      await decoding.succeed({ ["__proto__"]: "value" })
+      await decoding.fail({ ["__proto__"]: 123 }, `Expected string\n  at ["__proto__"]`)
+    })
+
     it("empty struct", () => {
       assertSchema({ schema: Schema.Struct({}) }, {
         codes: makeCode("Schema.Struct({  })", "{  }")
@@ -1162,12 +1364,12 @@ describe("toCodeDocument", () => {
         {
           codes: makeCode(
             `Schema.Struct({ [_symbol]: Schema.String })`,
-            `{ readonly [typeof _symbol]: string }`
+            `{ readonly [_symbol]: string }`
           ),
           artifacts: [{
             _tag: "Symbol",
             identifier: "_symbol",
-            generation: makeCode(`Symbol.for("a")`, `typeof _symbol`)
+            code: makeCode(`Symbol.for("a")`, `typeof _symbol`)
           }]
         }
       )
@@ -1200,26 +1402,26 @@ describe("toCodeDocument", () => {
     assertSchema(
       {
         schema: Schema.StructWithRest(Schema.Struct({ a: Schema.Number }), [
-          Schema.Record(Schema.String, Schema.Boolean)
+          Schema.Record(Schema.String, Schema.Number)
         ])
       },
       {
         codes: makeCode(
-          `Schema.StructWithRest(Schema.Struct({ "a": Schema.Number }), [Schema.Record(Schema.String, Schema.Boolean)])`,
-          `{ readonly "a": number, readonly [x: string]: boolean }`
+          `Schema.StructWithRest(Schema.Struct({ "a": Schema.Number }), [Schema.Record(Schema.String, Schema.Number)])`,
+          `{ readonly "a": number } & { readonly [x: string]: number }`
         )
       }
     )
     assertSchema(
       {
         schema: Schema.StructWithRest(Schema.Struct({ a: Schema.Number }), [
-          Schema.Record(Schema.String, Schema.Boolean)
+          Schema.Record(Schema.String, Schema.Number)
         ]).annotate({ description: "a" })
       },
       {
         codes: makeCode(
-          `Schema.StructWithRest(Schema.Struct({ "a": Schema.Number }), [Schema.Record(Schema.String, Schema.Boolean)]).annotate({ "description": "a" })`,
-          `{ readonly "a": number, readonly [x: string]: boolean }`
+          `Schema.StructWithRest(Schema.Struct({ "a": Schema.Number }), [Schema.Record(Schema.String, Schema.Number)]).annotate({ "description": "a" })`,
+          `{ readonly "a": number } & { readonly [x: string]: number }`
         )
       }
     )
@@ -1300,6 +1502,70 @@ describe("toCodeDocument", () => {
   })
 
   describe("suspend", () => {
+    it("implicit recursive reference", () => {
+      assertMultiDocument({
+        representations: [{ _tag: "Reference", $ref: "Category" }],
+        references: {
+          Category: {
+            _tag: "Objects",
+            propertySignatures: [{
+              name: "children",
+              type: {
+                _tag: "Arrays",
+                elements: [],
+                rest: [{ _tag: "Reference", $ref: "Category" }],
+                checks: []
+              },
+              isOptional: false,
+              isMutable: false
+            }],
+            indexSignatures: [],
+            checks: []
+          }
+        }
+      }, {
+        codes: makeCode("Category", "Category"),
+        references: {
+          recursives: {
+            Category: makeCode(
+              `Schema.Struct({ "children": Schema.Array(Schema.suspend((): Schema.Codec<Category> => Category)) })`,
+              `{ readonly "children": ReadonlyArray<Category> }`
+            )
+          }
+        }
+      })
+    })
+
+    it("supports __proto__ as a recursive reference", () => {
+      const references = Object.fromEntries([["__proto__", {
+        _tag: "Objects",
+        propertySignatures: [{
+          name: "next",
+          type: { _tag: "Reference", $ref: "__proto__" },
+          isOptional: true,
+          isMutable: false
+        }],
+        indexSignatures: [],
+        checks: []
+      }]]) as SchemaRepresentation.References
+
+      assertMultiDocument({
+        representations: [{ _tag: "Reference", $ref: "__proto__" }],
+        references
+      }, {
+        codes: makeCode("__proto__", "__proto__"),
+        references: {
+          recursives: Object.fromEntries([[
+            "__proto__",
+            makeCode(
+              `Schema.Struct({ "next": Schema.optionalKey(Schema.suspend((): Schema.Codec<__proto__> => __proto__)) })`,
+              `{ readonly "next"?: __proto__ }`
+            )
+          ]])
+        }
+      })
+    })
+
     it("non-recursive", () => {
       assertSchema(
         {
@@ -1369,7 +1635,7 @@ describe("toCodeDocument", () => {
         references: {
           recursives: {
             A: makeCode(
-              `Schema.Struct({ "a": Schema.optionalKey(Suspend_) }).annotate({ "identifier": "A" })`,
+              `Schema.Struct({ "a": Schema.optionalKey(Schema.suspend((): Schema.Codec<Suspend_> => Suspend_)) }).annotate({ "identifier": "A" })`,
               `{ readonly "a"?: Suspend_ }`
             ),
             Suspend_: makeCode(
@@ -1398,7 +1664,7 @@ describe("toCodeDocument", () => {
               `Objects_`
             ),
             Objects_: makeCode(
-              `Schema.Struct({ "a": Schema.optionalKey(A) })`,
+              `Schema.Struct({ "a": Schema.optionalKey(Schema.suspend((): Schema.Codec<A> => A)) })`,
               `{ readonly "a"?: A }`
             )
           }
@@ -1507,15 +1773,6 @@ describe("toCodeDocument", () => {
     })
 
     describe("checks", () => {
-      it("isDateValid", () => {
-        assertSchema(
-          { schema: Schema.Date.check(Schema.isDateValid()) },
-          {
-            codes: makeCode(`Schema.Date.check(Schema.isDateValid())`, "globalThis.Date")
-          }
-        )
-      })
-
       it("isGreaterThanDate", () => {
         assertSchema(
           { schema: Schema.Date.check(Schema.isGreaterThanDate(new Date(0))) },
@@ -1557,7 +1814,7 @@ describe("toCodeDocument", () => {
           { schema: Schema.Date.check(Schema.isBetweenDate({ minimum: new Date(0), maximum: new Date(1) })) },
           {
             codes: makeCode(
-              `Schema.Date.check(Schema.isBetweenDate({ minimum: new Date(0), maximum: new Date(1), exclusiveMinimum: undefined, exclusiveMaximum: undefined))`,
+              `Schema.Date.check(Schema.isBetweenDate({ minimum: new Date(0), maximum: new Date(1), exclusiveMinimum: undefined, exclusiveMaximum: undefined }))`,
               "globalThis.Date"
             )
           }
@@ -1641,7 +1898,16 @@ describe("toCodeDocument", () => {
           }
         }
       }, {
-        codes: makeCode(`Schema.String`, "string")
+        codes: makeCode(`A`, "A"),
+        references: {
+          nonRecursives: [{
+            $ref: "A",
+            code: makeCode(
+              `Schema.String.annotate({ "identifier": "A" })`,
+              "string"
+            )
+          }]
+        }
       })
     })
 
@@ -1658,7 +1924,8 @@ describe("toCodeDocument", () => {
                   properties: {
                     a: {
                       type: "string"
-                    }
+                    },
+                    b: {}
                   },
                   required: ["a"]
                 }
@@ -1669,7 +1936,8 @@ describe("toCodeDocument", () => {
               properties: {
                 b: {
                   type: "number"
-                }
+                },
+                a: {}
               },
               required: ["b"]
             }
@@ -1682,366 +1950,13 @@ describe("toCodeDocument", () => {
             {
               $ref: "A",
               code: makeCode(
-                `Schema.Struct({ "b": Schema.Number.check(Schema.isFinite()), "a": Schema.String })`,
+                `Schema.Struct({ "b": Schema.Number.check(Schema.isFinite()), "a": Schema.String }).annotate({ "identifier": "A" })`,
                 `{ readonly "b": number, readonly "a": string }`
               )
             }
           ]
         }
       })
-    })
-  })
-})
-
-describe("sanitizeJavaScriptIdentifier", () => {
-  const sanitizeJavaScriptIdentifier = SchemaRepresentation.sanitizeJavaScriptIdentifier
-
-  it("returns '_' for empty input", () => {
-    strictEqual(sanitizeJavaScriptIdentifier(""), "_")
-  })
-
-  it("returns input when already a valid uppercase-start identifier", () => {
-    strictEqual(sanitizeJavaScriptIdentifier("Abc"), "Abc")
-    strictEqual(sanitizeJavaScriptIdentifier("_"), "_")
-    strictEqual(sanitizeJavaScriptIdentifier("$"), "$")
-    strictEqual(sanitizeJavaScriptIdentifier("$a_b9"), "$a_b9")
-    strictEqual(sanitizeJavaScriptIdentifier("A1b2"), "A1b2")
-  })
-
-  it("uppercases a leading ASCII letter", () => {
-    strictEqual(sanitizeJavaScriptIdentifier("abc"), "Abc")
-    strictEqual(sanitizeJavaScriptIdentifier("a0"), "A0")
-    strictEqual(sanitizeJavaScriptIdentifier("a1b2c3"), "A1b2c3")
-    strictEqual(sanitizeJavaScriptIdentifier("class"), "Class")
-  })
-
-  it("prefixes '_' when starting with a digit", () => {
-    strictEqual(sanitizeJavaScriptIdentifier("1"), "_1")
-    strictEqual(sanitizeJavaScriptIdentifier("1a"), "_1a")
-    strictEqual(sanitizeJavaScriptIdentifier("9lives"), "_9lives")
-  })
-
-  it("replaces invalid leading characters with '_'", () => {
-    strictEqual(sanitizeJavaScriptIdentifier(" abc"), "_abc")
-    strictEqual(sanitizeJavaScriptIdentifier("-a"), "_a")
-    strictEqual(sanitizeJavaScriptIdentifier(".a"), "_a")
-    strictEqual(sanitizeJavaScriptIdentifier(" a"), "_a")
-    strictEqual(sanitizeJavaScriptIdentifier("\ta"), "_a")
-  })
-
-  it("replaces invalid characters with '_'", () => {
-    strictEqual(sanitizeJavaScriptIdentifier("a-b"), "A_b")
-    strictEqual(sanitizeJavaScriptIdentifier("a b"), "A_b")
-    strictEqual(sanitizeJavaScriptIdentifier("a.b"), "A_b")
-    strictEqual(sanitizeJavaScriptIdentifier("a/b"), "A_b")
-  })
-
-  it("replaces multiple invalid characters with '_'", () => {
-    strictEqual(sanitizeJavaScriptIdentifier("a-b c"), "A_b_c")
-    strictEqual(sanitizeJavaScriptIdentifier("a..b"), "A__b")
-    strictEqual(sanitizeJavaScriptIdentifier("a--b"), "A__b")
-    strictEqual(sanitizeJavaScriptIdentifier("a b\tc"), "A_b_c")
-  })
-
-  it("replaces non-ascii characters with '_' under ASCII rules", () => {
-    strictEqual(sanitizeJavaScriptIdentifier("café"), "Caf_")
-    strictEqual(sanitizeJavaScriptIdentifier("你好"), "__")
-    strictEqual(sanitizeJavaScriptIdentifier("🤖"), "_")
-    strictEqual(sanitizeJavaScriptIdentifier("a🤖b"), "A_b")
-  })
-
-  it("allows '$' and '_' anywhere", () => {
-    strictEqual(sanitizeJavaScriptIdentifier("a$b"), "A$b")
-    strictEqual(sanitizeJavaScriptIdentifier("a_b"), "A_b")
-    strictEqual(sanitizeJavaScriptIdentifier("$a_b9"), "$a_b9")
-  })
-
-  it("keeps already-sanitized results stable (idempotent)", () => {
-    const cases = [
-      "",
-      "abc",
-      "_",
-      "$",
-      "a1b2",
-      "a-b",
-      "a b",
-      "1a",
-      "-a",
-      "class",
-      "café",
-      "a🤖b"
-    ] as const
-
-    for (const input of cases) {
-      const once = sanitizeJavaScriptIdentifier(input)
-      const twice = sanitizeJavaScriptIdentifier(once)
-      strictEqual(twice, once)
-    }
-  })
-
-  it("preserves length when only replacements are needed", () => {
-    strictEqual(sanitizeJavaScriptIdentifier("a-b").length, "a-b".length)
-    strictEqual(sanitizeJavaScriptIdentifier("a b").length, "a b".length)
-    strictEqual(sanitizeJavaScriptIdentifier("..").length, "..".length)
-  })
-
-  it("increases length only when prefixing is required", () => {
-    strictEqual(sanitizeJavaScriptIdentifier("1a"), "_1a")
-    strictEqual(sanitizeJavaScriptIdentifier("1a").length, "1a".length + 1)
-  })
-})
-
-describe("topologicalSort", () => {
-  function assertTopologicalSort(
-    definitions: Record<string, SchemaRepresentation.Representation>,
-    expected: SchemaRepresentation.TopologicalSort
-  ) {
-    deepStrictEqual(SchemaRepresentation.topologicalSort(definitions), expected)
-  }
-
-  it("empty definitions", () => {
-    assertTopologicalSort(
-      {},
-      { nonRecursives: [], recursives: {} }
-    )
-  })
-
-  it("single definition with no dependencies", () => {
-    assertTopologicalSort(
-      {
-        A: { _tag: "String", checks: [] }
-      },
-      {
-        nonRecursives: [
-          { $ref: "A", representation: { _tag: "String", checks: [] } }
-        ],
-        recursives: {}
-      }
-    )
-  })
-
-  it("multiple independent definitions", () => {
-    assertTopologicalSort({
-      A: { _tag: "String", checks: [] },
-      B: { _tag: "Number", checks: [] },
-      C: { _tag: "Boolean" }
-    }, {
-      nonRecursives: [
-        { $ref: "A", representation: { _tag: "String", checks: [] } },
-        { $ref: "B", representation: { _tag: "Number", checks: [] } },
-        { $ref: "C", representation: { _tag: "Boolean" } }
-      ],
-      recursives: {}
-    })
-  })
-
-  it("A -> B -> C", () => {
-    assertTopologicalSort({
-      A: { _tag: "String", checks: [] },
-      B: { _tag: "Reference", $ref: "A" },
-      C: { _tag: "Reference", $ref: "B" }
-    }, {
-      nonRecursives: [
-        { $ref: "A", representation: { _tag: "String", checks: [] } },
-        { $ref: "B", representation: { _tag: "Reference", $ref: "A" } },
-        { $ref: "C", representation: { _tag: "Reference", $ref: "B" } }
-      ],
-      recursives: {}
-    })
-  })
-
-  it("A -> B, A -> C", () => {
-    assertTopologicalSort({
-      A: { _tag: "String", checks: [] },
-      B: { _tag: "Reference", $ref: "A" },
-      C: { _tag: "Reference", $ref: "A" }
-    }, {
-      nonRecursives: [
-        { $ref: "A", representation: { _tag: "String", checks: [] } },
-        { $ref: "B", representation: { _tag: "Reference", $ref: "A" } },
-        { $ref: "C", representation: { _tag: "Reference", $ref: "A" } }
-      ],
-      recursives: {}
-    })
-  })
-
-  it("A -> B -> C, A -> D", () => {
-    assertTopologicalSort({
-      A: { _tag: "String", checks: [] },
-      B: { _tag: "Reference", $ref: "A" },
-      C: { _tag: "Reference", $ref: "B" },
-      D: { _tag: "Reference", $ref: "A" }
-    }, {
-      nonRecursives: [
-        { $ref: "A", representation: { _tag: "String", checks: [] } },
-        { $ref: "B", representation: { _tag: "Reference", $ref: "A" } },
-        { $ref: "D", representation: { _tag: "Reference", $ref: "A" } },
-        { $ref: "C", representation: { _tag: "Reference", $ref: "B" } }
-      ],
-      recursives: {}
-    })
-  })
-
-  it("self-referential definition (A -> A)", () => {
-    assertTopologicalSort({
-      A: { _tag: "Reference", $ref: "A" }
-    }, {
-      nonRecursives: [],
-      recursives: {
-        A: { _tag: "Reference", $ref: "A" }
-      }
-    })
-  })
-
-  it("mutual recursion (A -> B -> A)", () => {
-    assertTopologicalSort({
-      A: { _tag: "Reference", $ref: "B" },
-      B: { _tag: "Reference", $ref: "A" }
-    }, {
-      nonRecursives: [],
-      recursives: {
-        A: { _tag: "Reference", $ref: "B" },
-        B: { _tag: "Reference", $ref: "A" }
-      }
-    })
-  })
-
-  it("complex cycle (A -> B -> C -> A)", () => {
-    assertTopologicalSort({
-      A: { _tag: "Reference", $ref: "B" },
-      B: { _tag: "Reference", $ref: "C" },
-      C: { _tag: "Reference", $ref: "A" }
-    }, {
-      nonRecursives: [],
-      recursives: {
-        A: { _tag: "Reference", $ref: "B" },
-        B: { _tag: "Reference", $ref: "C" },
-        C: { _tag: "Reference", $ref: "A" }
-      }
-    })
-  })
-
-  it("mixed recursive and non-recursive definitions", () => {
-    assertTopologicalSort({
-      A: { _tag: "String", checks: [] },
-      B: { _tag: "Reference", $ref: "A" },
-      C: { _tag: "Reference", $ref: "C" },
-      D: { _tag: "Reference", $ref: "E" },
-      E: { _tag: "Reference", $ref: "D" }
-    }, {
-      nonRecursives: [
-        { $ref: "A", representation: { _tag: "String", checks: [] } },
-        { $ref: "B", representation: { _tag: "Reference", $ref: "A" } }
-      ],
-      recursives: {
-        C: { _tag: "Reference", $ref: "C" },
-        D: { _tag: "Reference", $ref: "E" },
-        E: { _tag: "Reference", $ref: "D" }
-      }
-    })
-  })
-
-  it("nested $ref in object properties", () => {
-    assertTopologicalSort({
-      A: { _tag: "String", checks: [] },
-      B: {
-        _tag: "Objects",
-        propertySignatures: [{
-          name: "value",
-          type: { _tag: "Reference", $ref: "A" },
-          isOptional: false,
-          isMutable: false
-        }],
-        indexSignatures: [],
-        checks: []
-      }
-    }, {
-      nonRecursives: [
-        { $ref: "A", representation: { _tag: "String", checks: [] } },
-        {
-          $ref: "B",
-          representation: {
-            _tag: "Objects",
-            propertySignatures: [{
-              name: "value",
-              type: { _tag: "Reference", $ref: "A" },
-              isOptional: false,
-              isMutable: false
-            }],
-            indexSignatures: [],
-            checks: []
-          }
-        }
-      ],
-      recursives: {}
-    })
-  })
-
-  it("nested $ref in array rest", () => {
-    assertTopologicalSort({
-      A: { _tag: "String", checks: [] },
-      B: {
-        _tag: "Arrays",
-        elements: [],
-        rest: [{ _tag: "Reference", $ref: "A" }],
-        checks: []
-      }
-    }, {
-      nonRecursives: [
-        { $ref: "A", representation: { _tag: "String", checks: [] } },
-        {
-          $ref: "B",
-          representation: { _tag: "Arrays", elements: [], rest: [{ _tag: "Reference", $ref: "A" }], checks: [] }
-        }
-      ],
-      recursives: {}
-    })
-  })
-
-  it("external $ref (not in definitions) should be ignored", () => {
-    assertTopologicalSort({
-      A: { _tag: "Reference", $ref: "#/definitions/External" },
-      B: { _tag: "Reference", $ref: "A" }
-    }, {
-      nonRecursives: [
-        { $ref: "A", representation: { _tag: "Reference", $ref: "#/definitions/External" } },
-        { $ref: "B", representation: { _tag: "Reference", $ref: "A" } }
-      ],
-      recursives: {}
-    })
-  })
-
-  it("multiple cycles with independent definitions", () => {
-    assertTopologicalSort({
-      Independent: { _tag: "String", checks: [] },
-      A: { _tag: "Reference", $ref: "B" },
-      B: { _tag: "Reference", $ref: "A" },
-      C: { _tag: "Reference", $ref: "D" },
-      D: { _tag: "Reference", $ref: "C" }
-    }, {
-      nonRecursives: [
-        { $ref: "Independent", representation: { _tag: "String", checks: [] } }
-      ],
-      recursives: {
-        A: { _tag: "Reference", $ref: "B" },
-        B: { _tag: "Reference", $ref: "A" },
-        C: { _tag: "Reference", $ref: "D" },
-        D: { _tag: "Reference", $ref: "C" }
-      }
-    })
-  })
-
-  it("definition depending on recursive definition", () => {
-    assertTopologicalSort({
-      A: { _tag: "Reference", $ref: "A" },
-      B: { _tag: "Reference", $ref: "A" }
-    }, {
-      nonRecursives: [
-        { $ref: "B", representation: { _tag: "Reference", $ref: "A" } }
-      ],
-      recursives: {
-        A: { _tag: "Reference", $ref: "A" }
-      }
     })
   })
 })

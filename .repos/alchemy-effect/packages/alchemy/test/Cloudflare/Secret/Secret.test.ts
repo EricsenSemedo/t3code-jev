@@ -1,6 +1,6 @@
 import * as Cloudflare from "@/Cloudflare";
-import * as Test from "@/Test/Vitest";
-import { expect } from "@effect/vitest";
+import * as Test from "@/Test/Alchemy";
+import { expect } from "alchemy-test";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import { MinimumLogLevel } from "effect/References";
@@ -15,7 +15,7 @@ import {
   STRING_VAR_VALUE,
 } from "./fixtures/worker.ts";
 /**
- * `Config.redacted("CONFIG_SECRET")` resolves against the active
+ * `Config.Redacted("CONFIG_SECRET")` resolves against the active
  * `ConfigProvider` at deploy time. The default provider reads from
  * `process.env`, so populate it before `beforeAll(deploy(Stack))`
  * compiles the stack.
@@ -58,15 +58,16 @@ const fetchWhenReady = (url: string) =>
       Effect.retry({
         while: (e): e is WorkerNotReady =>
           e instanceof WorkerNotReady && (e.status === 404 || e.status >= 500),
-        schedule: Schedule.exponential("500 millis").pipe(
-          Schedule.both(Schedule.recurs(20)),
-        ),
+        schedule: Schedule.max([
+          Schedule.exponential("500 millis"),
+          Schedule.recurs(20),
+        ]),
       }),
     );
   });
 
 test(
-  "Config.redacted with literal default round-trips to runtime as Redacted<string>",
+  "Config.Redacted with literal default round-trips to runtime as Redacted<string>",
   Effect.gen(function* () {
     const { url } = yield* stack;
     expect(url).toBeTypeOf("string");
@@ -84,7 +85,7 @@ test(
 );
 
 test(
-  "Config.redacted resolved from env deploys as a secret_text and round-trips",
+  "Config.Redacted resolved from env deploys as a secret_text and round-trips",
   Effect.gen(function* () {
     const { url } = yield* stack;
 
@@ -101,7 +102,7 @@ test(
 );
 
 test(
-  "Config.string round-trips to runtime as a string",
+  "Config.String round-trips to runtime as a string",
   Effect.gen(function* () {
     const { url } = yield* stack;
 
@@ -115,7 +116,7 @@ test(
 );
 
 test(
-  "Config.number round-trips to runtime preserving the number type",
+  "Config.Number round-trips to runtime preserving the number type",
   Effect.gen(function* () {
     const { url } = yield* stack;
 
@@ -129,7 +130,7 @@ test(
 );
 
 test(
-  "Config.string with object default round-trips to runtime preserving nested shape",
+  "Config.String with object default round-trips to runtime preserving nested shape",
   Effect.gen(function* () {
     const { url } = yield* stack;
 
