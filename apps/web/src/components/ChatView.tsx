@@ -7734,6 +7734,10 @@ export default function ChatView(props: ChatViewProps) {
     );
     let dispatchModelSelection = ctxSelectedModelSelection;
     let dispatchModel = ctxSelectedModel;
+    // Newer Jev servers issue this opaque reference after they start a local
+    // metadata-only record. Older servers omit it, so their command schema is
+    // left untouched rather than relying on permissive unknown-field parsing.
+    let jevRoutingCorrelationId: string | undefined;
     const jevRouteInput = buildJevRouteInput({
       enabled:
         settings.jevAutoSelectModel &&
@@ -7770,7 +7774,11 @@ export default function ChatView(props: ChatViewProps) {
             environmentId: primaryEnvironmentId ?? environmentId,
             input,
           });
-          return result._tag === "Success" ? result.value : { status: "unavailable" };
+          if (result._tag === "Success") {
+            jevRoutingCorrelationId = result.value.correlationId;
+            return result.value;
+          }
+          return { status: "unavailable" };
         },
       });
       setIsJevRouting(false);
@@ -8506,6 +8514,9 @@ export default function ChatView(props: ChatViewProps) {
           titleSeed: title,
           runtimeMode,
           interactionMode: sendInteractionMode,
+          ...(jevRoutingCorrelationId
+            ? { routingTest: { correlationId: jevRoutingCorrelationId } }
+            : {}),
           ...(bootstrap ? { bootstrap } : {}),
           createdAt: messageCreatedAt,
         },

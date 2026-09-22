@@ -296,6 +296,40 @@ describe("JevTaskRouteSuggestion", () => {
     }),
   );
 
+  it.effect("records the raw shadow suggestion even when it suppresses the client result", () =>
+    Effect.gen(function* () {
+      const finished: Array<{
+        readonly mode: "apply" | "shadow";
+        readonly result: { readonly status: string; readonly lane?: string };
+        readonly apiRequested: boolean;
+      }> = [];
+      const service = yield* make({
+        getEnvironmentVariable: (name) =>
+          name === "T3CODE_JEV_ROUTING_MODE" ? "shadow" : "test-key",
+        fetch: async () => contextualReadyResponse({ lane: "sol" }),
+        records: {
+          begin: () => "server-correlation",
+          finish: (record) => finished.push(record),
+          submitted: () => Effect.void,
+          drain: async () => undefined,
+        },
+      });
+      expect(
+        yield* service.suggest(
+          { task: "Investigate the failed patch", context, availableLanes: ["terra", "sol"] },
+          "session",
+        ),
+      ).toEqual({ status: "unavailable", correlationId: "server-correlation" });
+      expect(finished).toEqual([
+        expect.objectContaining({
+          mode: "shadow",
+          result: expect.objectContaining({ status: "ready", lane: "sol" }),
+          apiRequested: true,
+        }),
+      ]);
+    }),
+  );
+
   it.effect("sends bounded structured state and four independent contextual questions", () =>
     Effect.gen(function* () {
       let sent:
