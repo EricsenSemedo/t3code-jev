@@ -155,6 +155,33 @@ function endpointOrigin(httpBaseUrl: string) {
   };
 }
 
+async function wslLinkProofBaseUrl(target: CloudLinkTarget): Promise<string> {
+  const loopbackUrl = new URL(target.httpBaseUrl);
+  if (["127.0.0.1", "localhost", "[::1]"].includes(loopbackUrl.hostname)) {
+    return target.httpBaseUrl;
+  }
+  const bridge = typeof window === "undefined" ? undefined : window.desktopBridge;
+  if (!bridge || loopbackUrl.protocol !== "http:") return target.httpBaseUrl;
+  const wslOnly = await bridge.getWslState().then(
+    (state) => state.wslOnly,
+    () => false,
+  );
+  if (!wslOnly) return target.httpBaseUrl;
+
+  // The desktop advertises WSL's distro IP because Windows localhost forwarding
+  // is not always ready. Link proofs require a loopback request, so use it only
+  // after confirming that this port reaches the same environment.
+  loopbackUrl.hostname = "127.0.0.1";
+  const response = await fetch(new URL("/.well-known/t3/environment", loopbackUrl), {
+    credentials: "omit",
+    signal: AbortSignal.timeout(5_000),
+  });
+  if (!response.ok || (await response.json()).environmentId !== target.environmentId) {
+    throw new Error("Windows localhost does not reach the selected WSL environment.");
+  }
+  return loopbackUrl.href;
+}
+
 const MANAGED_ENDPOINT_PROVIDER_KIND =
   "cloudflare_tunnel" satisfies RelayManagedEndpointProviderKind;
 
@@ -275,6 +302,15 @@ export function linkPrimaryEnvironmentToCloud(input: {
       : PUBLISH_ONLY_PROVIDER_KIND;
     const relayClient = yield* ManagedRelay.ManagedRelayClient;
     const environmentClient = yield* makeEnvironmentHttpApiClient(input.target.httpBaseUrl);
+    const proofBaseUrl = yield* Effect.tryPromise({
+      try: () => wslLinkProofBaseUrl(input.target),
+      catch: (cause) =>
+        new CloudEnvironmentLinkError({
+          message: "Could not verify the local WSL link proof route.",
+          cause,
+        }),
+    });
+    const proofClient = yield* makeEnvironmentHttpApiClient(proofBaseUrl);
     if (managedTunnelsEnabled) {
       yield* ensureRelayClientAvailable(EnvironmentId.make(input.target.environmentId));
     }
@@ -295,7 +331,7 @@ export function linkPrimaryEnvironmentToCloud(input: {
           ),
         ),
       );
-    const proof = yield* environmentClient.connect
+    const proof = yield* proofClient.connect
       .linkProof({
         headers: {},
         payload: {
@@ -306,7 +342,7 @@ export function linkPrimaryEnvironmentToCloud(input: {
             wsBaseUrl: input.target.wsBaseUrl,
             providerKind,
           },
-          origin: endpointOrigin(input.target.httpBaseUrl),
+          origin: endpointOrigin(proofBaseUrl),
         },
       })
       .pipe(Effect.mapError(environmentApiError("Could not obtain environment link proof.")));
