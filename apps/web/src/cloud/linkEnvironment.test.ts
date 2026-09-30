@@ -299,6 +299,79 @@ describe("web cloud link environment client", () => {
     }),
   );
 
+  it.effect("keeps WSL credentials off a spoofed Windows loopback listener", () =>
+    Effect.gen(function* () {
+      const wslTarget = {
+        ...TARGET,
+        httpBaseUrl: "http://172.22.167.247:3000",
+        wsBaseUrl: "ws://172.22.167.247:3000",
+      };
+      const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+        const url = new URL(String(input));
+        // A Windows listener can copy the selected environment's public ID.
+        if (url.pathname === "/.well-known/t3/environment") {
+          return Response.json({ environmentId: TARGET.environmentId });
+        }
+        if (url.pathname === "/v1/client/environment-link-challenges") {
+          return Response.json({ challenge: "challenge", expiresAt: "2026-06-06T00:05:00.000Z" });
+        }
+        if (url.pathname === "/api/connect/link-proof") return Response.json("signed-proof");
+        if (url.pathname === "/v1/client/environment-links") {
+          return Response.json({
+            ok: true,
+            environmentId: TARGET.environmentId,
+            endpoint: {
+              httpBaseUrl: "https://desktop.example.test",
+              wsBaseUrl: "wss://desktop.example.test",
+              providerKind: "cloudflare_tunnel",
+            },
+            endpointRuntime: null,
+            relayIssuer: "https://relay.example.test",
+            cloudUserId: "user-1",
+            environmentCredential: "environment-credential",
+            cloudMintPublicKey: "public-key",
+          });
+        }
+        if (url.pathname === "/api/connect/relay-config") {
+          return Response.json({ ok: true, endpointRuntimeStatus: { status: "configured" } });
+        }
+        throw new Error(`Unexpected test request path: ${url.pathname}`);
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      vi.stubGlobal("window", {
+        location: { origin: "t3code://app" },
+        desktopBridge: {
+          getWslState: vi.fn().mockResolvedValue({ wslOnly: true }),
+          getLocalEnvironmentBearerToken: vi.fn().mockResolvedValue("desktop-bearer-token"),
+        } as unknown as DesktopBridge,
+      });
+
+      yield* withServices(
+        linkPrimaryEnvironmentToCloud({ target: wslTarget, clerkToken: "clerk-token" }),
+      );
+
+      const requests = fetchMock.mock.calls.map(([url, init]) => new Request(url, init));
+      expect(requests.filter((request) => new URL(request.url).hostname === "127.0.0.1")).toEqual(
+        [],
+      );
+      const proofRequest = requests.find(
+        (request) => new URL(request.url).pathname === "/api/connect/link-proof",
+      )!;
+      expect(proofRequest.url).toBe("http://172.22.167.247:3000/api/connect/link-proof");
+      expect(proofRequest.headers.get("authorization")).toBe("Bearer desktop-bearer-token");
+      expect(proofRequest.credentials).toBe("omit");
+      // @effect-diagnostics-next-line preferSchemaOverJson:off
+      expect(JSON.parse(yield* Effect.promise(() => proofRequest.text()))).toMatchObject({
+        endpoint: { httpBaseUrl: wslTarget.httpBaseUrl, wsBaseUrl: wslTarget.wsBaseUrl },
+        origin: { localHttpHost: "127.0.0.1", localHttpPort: 3000 },
+      });
+      const configRequest = requests.find(
+        (request) => new URL(request.url).pathname === "/api/connect/relay-config",
+      )!;
+      expect(configRequest.url).toBe("http://172.22.167.247:3000/api/connect/relay-config");
+    }),
+  );
+
   it.effect("links publish-only without a managed tunnel", () =>
     Effect.gen(function* () {
       const fetchMock = vi

@@ -1,7 +1,9 @@
+import * as NodeHttpClient from "@effect/platform-node/NodeHttpClient";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeSocket from "@effect/platform-node/NodeSocket";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeCrypto from "node:crypto";
+import * as NodeOS from "node:os";
 import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hostProcess";
 
 import {
@@ -52,7 +54,13 @@ import {
   computeDpopJwkThumbprint,
   type DpopPublicJwk,
 } from "@t3tools/shared/dpop";
-import { RELAY_HEALTH_REQUEST_TYP, RELAY_MINT_REQUEST_TYP } from "@t3tools/shared/relayJwt";
+import {
+  decodeRelayJwt,
+  RELAY_HEALTH_REQUEST_TYP,
+  RELAY_LINK_PROOF_TYP,
+  RELAY_MINT_REQUEST_TYP,
+  verifyRelayJwt,
+} from "@t3tools/shared/relayJwt";
 import * as RelayClient from "@t3tools/shared/relayClient";
 import { assert, it } from "@effect/vitest";
 import { assertFailure, assertInclude, assertTrue } from "@effect/vitest/utils";
@@ -2700,6 +2708,103 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(bootstrap.body.dpopFailureReason, "request_mismatch");
       assert.equal(typeof bootstrap.body.traceId, "string");
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  const localIpv4Address = Object.values(NodeOS.networkInterfaces())
+    .flatMap((addresses) => addresses ?? [])
+    .find((address) => address.family === "IPv4" && !address.internal)?.address;
+
+  it.effect.skipIf(!localIpv4Address)(
+    "allows WSL desktop link proofs on a local IPv4 interface without relaxing other origins",
+    () =>
+      Effect.gen(function* () {
+        const wslEnvironment: NodeJS.ProcessEnv = { WSL_DISTRO_NAME: "Synthetic-Test-Distro" };
+        yield* buildAppUnderTest({ config: { host: "0.0.0.0" } }).pipe(
+          Effect.provideService(HostProcessPlatform, "linux"),
+          Effect.provideService(HostProcessEnvironment, wslEnvironment),
+        );
+        const ownerCookie = yield* getAuthenticatedSessionCookieHeader();
+        const exchanged = yield* exchangeAccessToken();
+        assert.equal(exchanged.response.status, 200);
+        const requestUrl = new URL(yield* getHttpServerUrl("/api/connect/link-proof"));
+        const serverPort = Number(requestUrl.port);
+        const payload = {
+          challenge: "synthetic-relay-link-challenge",
+          relayIssuer: "https://relay.example.test",
+          endpoint: {
+            httpBaseUrl: `http://${localIpv4Address}:${serverPort}`,
+            wsBaseUrl: `ws://${localIpv4Address}:${serverPort}`,
+            providerKind: "cloudflare_tunnel",
+          },
+          origin: { localHttpHost: "127.0.0.1", localHttpPort: serverPort },
+        };
+        const headers = {
+          authorization: `Bearer ${exchanged.body.access_token}`,
+          host: `${localIpv4Address}:${serverPort}`,
+        };
+        // Fetch ignores custom Host headers; use node:http to exercise the
+        // distro-IP authority and the server's rejection checks over real HTTP.
+        const postProof = (requestHeaders: Record<string, string>, requestPayload = payload) =>
+          Effect.gen(function* () {
+            const response = yield* HttpClient.post(requestUrl.href, {
+              headers: requestHeaders,
+              body: HttpBody.text(jsonRequestBody(requestPayload), "application/json"),
+            });
+            return {
+              status: response.status,
+              headers: response.headers,
+              body: yield* response.json,
+            };
+          }).pipe(Effect.provide(NodeHttpClient.layerNodeHttp));
+
+        const response = yield* postProof(headers);
+        assert.equal(response.status, 200);
+        assert.equal(response.headers["cache-control"], "no-store");
+        const token = response.body as string;
+        const decoded = decodeRelayJwt(token);
+        const proof = yield* verifyRelayJwt({
+          token,
+          publicKey: String(decoded.environmentPublicKey),
+          typ: RELAY_LINK_PROOF_TYP,
+          issuer: String(decoded.iss),
+          audience: payload.relayIssuer,
+          nowEpochSeconds: Math.floor((yield* DateTime.now).epochMilliseconds / 1_000),
+        });
+        assert.equal(proof.challenge, payload.challenge);
+        assert.deepEqual(proof.origin, payload.origin);
+        assert.deepEqual(proof.scopes, ["agent_activity_notifications", "managed_tunnels"]);
+
+        const forbidden = [
+          { headers: { host: headers.host, cookie: ownerCookie }, payload },
+          { headers: { ...headers, host: `192.0.2.1:${serverPort}` }, payload },
+          { headers: { ...headers, "x-forwarded-host": headers.host }, payload },
+          {
+            headers,
+            payload: {
+              ...payload,
+              origin: { ...payload.origin, localHttpHost: localIpv4Address! },
+            },
+          },
+          {
+            headers,
+            payload: {
+              ...payload,
+              origin: {
+                ...payload.origin,
+                localHttpPort: serverPort === 65_535 ? serverPort - 1 : serverPort + 1,
+              },
+            },
+          },
+        ];
+        for (const request of forbidden) {
+          const rejected = yield* postProof(request.headers, request.payload);
+          assert.equal(rejected.status, 400);
+          const body = rejected.body as { readonly message: string };
+          assert.equal(body.message, "Invalid managed endpoint origin.");
+        }
+        delete wslEnvironment.WSL_DISTRO_NAME;
+        assert.equal((yield* postProof(headers)).status, 400);
+      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
   it.effect("rejects cloud link proofs for non-loopback managed endpoint origins", () =>
