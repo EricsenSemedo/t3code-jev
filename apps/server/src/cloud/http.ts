@@ -1,4 +1,6 @@
 import * as NodeCrypto from "node:crypto";
+import * as NodeNet from "node:net";
+import * as NodeOS from "node:os";
 import {
   AuthRelayReadScope,
   AuthRelayWriteScope,
@@ -30,6 +32,7 @@ import {
   RelayManagedEndpointOrigin,
   RelayOkResponse,
 } from "@t3tools/contracts/relay";
+import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { withRelayClientTracing } from "@t3tools/shared/relayTracing";
 import {
   normalizeRelayIssuer,
@@ -297,16 +300,53 @@ function endpointRequestPort(url: URL): number {
   return Number(url.port || (url.protocol === "https:" ? 443 : 80));
 }
 
+export function isAuthenticatedWslDesktopRequest(input: {
+  readonly config: Pick<
+    ServerConfig.ServerConfig["Service"],
+    "mode" | "host" | "desktopBootstrapToken"
+  >;
+  readonly requestUrl: string;
+  readonly session: { readonly subject: string; readonly method: string };
+  readonly isWsl: boolean;
+  readonly localIpv4Addresses: ReadonlySet<string>;
+}): boolean {
+  const url = new URL(input.requestUrl);
+  if (
+    !input.isWsl ||
+    input.config.mode !== "desktop" ||
+    input.config.host !== "0.0.0.0" ||
+    !input.config.desktopBootstrapToken ||
+    input.session.subject !== "desktop-bootstrap" ||
+    input.session.method !== "bearer-access-token" ||
+    url.protocol !== "http:" ||
+    NodeNet.isIP(url.hostname) !== 4
+  ) {
+    return false;
+  }
+
+  return input.localIpv4Addresses.has(url.hostname);
+}
+
+function localNonLoopbackIpv4Addresses(): ReadonlySet<string> {
+  return new Set(
+    Object.values(NodeOS.networkInterfaces())
+      .flatMap((addresses) => addresses ?? [])
+      .filter((address) => address.family === "IPv4" && !address.internal)
+      .map((address) => address.address),
+  );
+}
+
 function isAllowedEndpointOrigin(input: {
   readonly origin: RelayManagedEndpointOrigin;
   readonly requestUrl: string;
+  readonly allowWslDesktopRequest?: boolean;
 }): boolean {
   if (!isLoopbackHostname(input.origin.localHttpHost)) {
     return false;
   }
 
   const url = new URL(input.requestUrl);
-  if (!isLoopbackHostname(url.hostname)) {
+  if (!isLoopbackHostname(url.hostname) && !input.allowWslDesktopRequest) {
     return false;
   }
 
@@ -378,6 +418,7 @@ const makeCloudLinkProof = Effect.fn("environment.cloud.makeLinkProof")(function
   dependencies: CloudHttpDependencies,
   request: RelayLinkProofRequest,
   requestUrl: string,
+  allowWslDesktopRequest = false,
 ) {
   const keyPair = yield* getOrCreateEnvironmentKeyPairFromSecretStore(dependencies.secrets);
   if (
@@ -385,6 +426,7 @@ const makeCloudLinkProof = Effect.fn("environment.cloud.makeLinkProof")(function
     !isAllowedEndpointOrigin({
       origin: request.origin,
       requestUrl,
+      allowWslDesktopRequest,
     })
   ) {
     return yield* new EnvironmentHttpBadRequestError({
@@ -426,7 +468,8 @@ const makeCloudLinkProof = Effect.fn("environment.cloud.makeLinkProof")(function
 
 const cloudLinkProofHandler = Effect.fn("environment.cloud.linkProof")(
   function* (dependencies: CloudHttpDependencies, request: RelayLinkProofRequest) {
-    yield* requireEnvironmentScope(AuthRelayWriteScope);
+    const config = yield* ServerConfig.ServerConfig;
+    const session = yield* requireEnvironmentScope(AuthRelayWriteScope);
     const httpRequest = yield* HttpServerRequest.HttpServerRequest;
     const requestUrl = requestAbsoluteUrl(httpRequest);
     if (requestUrl === null || hasForwardedAuthorityHeaders(httpRequest)) {
@@ -434,7 +477,20 @@ const cloudLinkProofHandler = Effect.fn("environment.cloud.linkProof")(
         message: "Invalid managed endpoint origin.",
       });
     }
-    const proof = yield* makeCloudLinkProof(dependencies, request, requestUrl);
+    const platform = yield* HostProcessPlatform;
+    const hostEnvironment = yield* HostProcessEnvironment;
+    const proof = yield* makeCloudLinkProof(
+      dependencies,
+      request,
+      requestUrl,
+      isAuthenticatedWslDesktopRequest({
+        config,
+        requestUrl,
+        session,
+        isWsl: platform === "linux" && Boolean(hostEnvironment.WSL_DISTRO_NAME),
+        localIpv4Addresses: localNonLoopbackIpv4Addresses(),
+      }),
+    );
     yield* appendCloudCredentialResponseHeaders;
     return proof satisfies RelayEnvironmentLinkProof;
   },

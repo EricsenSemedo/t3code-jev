@@ -33,6 +33,7 @@ import type { RelayLinkProofRequest } from "@t3tools/contracts/relay";
 import { CLOUD_ENDPOINT_RUNTIME_CONFIG, RELAY_URL_SECRET } from "./config.ts";
 import {
   consumeCloudReplayGuards,
+  isAuthenticatedWslDesktopRequest,
   isSupportedLinkProviderKind,
   linkProofScopes,
   pendingServiceUpdateExists,
@@ -582,6 +583,35 @@ describe("releaseManagedTunnelOnShutdown", () => {
 });
 
 describe("link proof provider kinds", () => {
+  it("limits distro-IP proofs to the desktop WSL bearer and a local interface", () => {
+    const valid = {
+      config: {
+        mode: "desktop" as const,
+        host: "0.0.0.0",
+        desktopBootstrapToken: "desktop-seed",
+      },
+      requestUrl: "http://172.22.167.247:3773/api/connect/link-proof",
+      session: { subject: "desktop-bootstrap", method: "bearer-access-token" },
+      isWsl: true,
+      localIpv4Addresses: new Set(["172.22.167.247"]),
+    };
+    expect(isAuthenticatedWslDesktopRequest(valid)).toBe(true);
+    const rejected = [
+      { ...valid, isWsl: false },
+      { ...valid, config: { ...valid.config, mode: "web" as const } },
+      { ...valid, config: { ...valid.config, host: "127.0.0.1" } },
+      { ...valid, config: { ...valid.config, desktopBootstrapToken: undefined } },
+      { ...valid, session: { ...valid.session, subject: "one-time-token" } },
+      { ...valid, session: { ...valid.session, method: "browser-session-cookie" } },
+      { ...valid, session: { ...valid.session, method: "dpop-access-token" } },
+      { ...valid, requestUrl: "http://192.0.2.1:3773/api/connect/link-proof" },
+      { ...valid, requestUrl: "https://172.22.167.247:3773/api/connect/link-proof" },
+      { ...valid, requestUrl: "http://environment.example.test:3773/api/connect/link-proof" },
+      { ...valid, localIpv4Addresses: new Set<string>() },
+    ];
+    for (const input of rejected) expect(isAuthenticatedWslDesktopRequest(input)).toBe(false);
+  });
+
   const proofRequest = (
     providerKind: RelayLinkProofRequest["endpoint"]["providerKind"],
   ): RelayLinkProofRequest => ({
