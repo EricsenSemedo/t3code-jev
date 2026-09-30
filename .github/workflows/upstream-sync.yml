@@ -110,10 +110,15 @@ jobs:
         if: steps.merge.outputs.has_changes == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          T3CODE_UPSTREAM_SYNC_TOKEN: ${{ secrets.T3CODE_UPSTREAM_SYNC_TOKEN }}
         shell: bash
         run: |
           if [[ -z "$(gh pr list --repo "$GITHUB_REPOSITORY" --base main --head automation/upstream-main --state open --json number --jq '.[0].number')" ]]; then
-            gh pr create --repo "$GITHUB_REPOSITORY" --base main --head automation/upstream-main --title "chore: sync upstream main" --body "Merges pingdotgg/t3code main while preserving Personal changes. Automatically merges only after the exact revision passes full CI, both installer builds and CodeRabbit approval, with no unresolved review threads. Conflicts or failed checks leave this PR pending. A successful merge triggers a Personal release."
+            if [[ -z "${T3CODE_UPSTREAM_SYNC_TOKEN:-}" ]]; then
+              echo "Refusing to create an upstream sync PR: set T3CODE_UPSTREAM_SYNC_TOKEN to a user token with pull-request write access so CodeRabbit can review the PR author." >&2
+              exit 1
+            fi
+            GH_TOKEN="$T3CODE_UPSTREAM_SYNC_TOKEN" gh pr create --repo "$GITHUB_REPOSITORY" --base main --head automation/upstream-main --title "chore: sync upstream main" --body "Merges pingdotgg/t3code main while preserving Personal changes. Automatically merges only after the exact revision passes full CI, both installer builds and CodeRabbit approval, with no unresolved review threads. Conflicts or failed checks leave this PR pending. A successful merge triggers a Personal release."
           fi
       - name: Dispatch CI for the review branch
         if: steps.merge.outputs.has_changes == 'true'

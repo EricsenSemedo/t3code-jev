@@ -32,6 +32,11 @@ async function completeUpstreamSync({ github, context, core, now = Date.now() })
     pr.base.ref !== "main"
   )
     return pending("unexpected PR identity or draft state");
+  if (pr.user?.login === "github-actions[bot]") {
+    return pending(
+      "sync PR is authored by github-actions[bot], which CodeRabbit will not review. Close and recreate it after configuring T3CODE_UPSTREAM_SYNC_TOKEN.",
+    );
+  }
   const head = pr.head.sha;
   const base = pr.base.sha;
   const { data: comparison } = await github.rest.repos.compareCommitsWithBasehead({

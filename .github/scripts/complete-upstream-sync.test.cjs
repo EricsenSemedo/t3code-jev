@@ -5,6 +5,7 @@ const { completeUpstreamSync } = require("./complete-upstream-sync.cjs");
 function fixture() {
   const pr = {
     number: 7,
+    user: { login: "EricsenSemedo" },
     state: "open",
     draft: false,
     mergeable: true,
@@ -86,6 +87,9 @@ test("merges only the validated SHA and explicitly dispatches publication", asyn
 const blocked = {
   "foreign repository": (s) => {
     s.pr.head.repo.full_name = "attacker/fork";
+  },
+  "bot-authored sync PR": (s) => {
+    s.pr.user.login = "github-actions[bot]";
   },
   draft: (s) => {
     s.pr.draft = true;
@@ -173,6 +177,14 @@ test("retries a missing review but never merges on a request alone", async () =>
   assert.equal(await completeUpstreamSync(options), false);
   assert.match(state.requests[0].body, /@coderabbitai full review/);
   assert.equal(state.merges.length, 0);
+});
+
+test("does not request a review for a bot-authored sync PR", async () => {
+  const { state, options } = fixture();
+  state.pr.user.login = "github-actions[bot]";
+  assert.equal(await completeUpstreamSync(options), false);
+  assert.deepEqual(state.requests, []);
+  assert.deepEqual(state.merges, []);
 });
 
 test("review retries are throttled across scheduled gate runs", async () => {
